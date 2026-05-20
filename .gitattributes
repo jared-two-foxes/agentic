@@ -1,0 +1,37 @@
+# Normalise all text files to LF in the repository.
+# Git will convert to the platform line ending on checkout only if
+# core.autocrlf=true is set — this file overrides that for every file
+# listed here, ensuring the repo itself always stores LF.
+
+* text=auto eol=lf
+
+# Explicitly text — always LF
+*.ts        text eol=lf
+*.svelte    text eol=lf
+*.mts       text eol=lf
+*.mjs       text eol=lf
+*.cjs       text eol=lf
+*.js        text eol=lf
+*.json      text eol=lf
+*.jsonc     text eol=lf
+*.html      text eol=lf
+*.css       text eol=lf
+*.md        text eol=lf
+*.yml       text eol=lf
+*.yaml      text eol=lf
+*.toml      text eol=lf
+*.txt       text eol=lf
+.gitignore  text eol=lf
+.vscodeignore text eol=lf
+
+# Binary — never touch line endings
+*.vsix      binary
+*.png       binary
+*.jpg       binary
+*.jpeg      binary
+*.gif       binary
+*.ico       binary
+*.woff      binary
+*.woff2     binary
+*.ttf       binary
+*.eot       binary
