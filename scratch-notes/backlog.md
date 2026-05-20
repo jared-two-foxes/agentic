@@ -100,12 +100,12 @@ Build the webview frontend.
 
 Connect the API client to the Svelte UI via `postMessage`.
 
-- [ ] In `ChatPanel.ts`, listen for `{ type: 'send', text }` messages from the webview
-- [ ] On receive: call `api.sendMessage(sessionId, text)` then `api.subscribeEvents(...)` 
-- [ ] Forward each `OpenCodeEvent` to the webview via `panel.webview.postMessage(event)`
-- [ ] Handle session creation on first message (lazy init): call `api.createSession()` and cache the ID
-- [ ] Forward server-ready / server-error status changes to the webview so the status indicator updates
-- [ ] Ensure the SSE subscription is torn down when the webview is disposed
+- [x] In `ChatPanel.ts`, listen for `{ type: 'send', text }` messages from the webview
+- [x] On receive: call `api.sendMessage(sessionId, text)` then `api.subscribeEvents(...)`
+- [x] Forward each `OpenCodeEvent` to the webview via `panel.webview.postMessage(event)`
+- [x] Handle session creation on first message (lazy init): call `api.createSession()` and cache the ID
+- [x] Forward server-ready / server-error status changes to the webview so the status indicator updates
+- [x] Ensure the SSE subscription is torn down when the webview is disposed
 
 **Acceptance:** Typing a prompt and pressing Send streams a response into the chat UI end-to-end.
 

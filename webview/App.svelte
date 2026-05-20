@@ -183,6 +183,7 @@
     };
 
     window.addEventListener('message', handler);
+    vscode.postMessage({ type: 'getStatus' });
     // Return cleanup so Svelte removes the listener when the component is destroyed
     return () => window.removeEventListener('message', handler);
   });

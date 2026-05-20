@@ -2,9 +2,15 @@ import * as vscode from "vscode";
 import * as cp from "child_process";
 import * as http from "http";
 
+export type ServerStatus = {
+  value: "connecting" | "ready" | "error";
+  message?: string;
+};
+
 export class ServerManager {
   private child: cp.ChildProcess | undefined;
   private outputChannel: vscode.OutputChannel;
+  onStatusChange?: (status: ServerStatus) => void;
 
   constructor() {
     this.outputChannel = vscode.window.createOutputChannel("opencode server");
@@ -16,6 +22,8 @@ export class ServerManager {
     const binaryPath: string = config.get("binaryPath") || "opencode";
 
     this.outputChannel.show(true);
+
+    this.onStatusChange?.({ value: "connecting" });
 
     return new Promise((resolve, reject) => {
       let child: cp.ChildProcess;
@@ -45,7 +53,13 @@ export class ServerManager {
         this.outputChannel.appendLine(`[opencode] process exited with code ${code}`);
       });
 
-      this._pollReady(port, 10_000).then(resolve).catch(reject);
+      this._pollReady(port, 10_000).then(() => {
+        this.onStatusChange?.({ value: "ready" });
+        resolve();
+      }).catch((err: Error) => {
+        this.onStatusChange?.({ value: "error", message: err.message });
+        reject(err);
+      });
     });
   }
 
@@ -61,6 +75,7 @@ export class ServerManager {
         }
       });
     }
+    this.onStatusChange?.({ value: "error", message: nodeErr.message });
     reject(nodeErr);
   }
 

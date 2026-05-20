@@ -5,12 +5,17 @@ import { ServerManager } from "./server";
 let serverManager: ServerManager | undefined;
 
 export function activate(context: vscode.ExtensionContext): void {
-  const provider = new ChatPanel(context.extensionUri);
+  serverManager = new ServerManager();
+  const provider = new ChatPanel(context.extensionUri, serverManager, context.secrets);
+
+  serverManager.onStatusChange = (status) => {
+    provider.notifyStatus(status);
+  };
+
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(ChatPanel.viewId, provider)
   );
 
-  serverManager = new ServerManager();
   serverManager.start().catch(() => {});
 }
 
