@@ -176,6 +176,12 @@
           // assistant turn complete — nothing special needed for v1
           break;
         }
+        case 'newSession': {
+          messages = [];
+          status = 'connecting';
+          statusMessage = '';
+          break;
+        }
         default:
           // unknown message type — ignore
           break;

@@ -37,6 +37,16 @@ export class ChatPanel implements vscode.WebviewViewProvider {
     return this._sessionPromise;
   }
 
+  /** Called by opencode.newSession command to clear state and reset the UI */
+  resetSession(): void {
+    this._unsubscribe?.();
+    this._unsubscribe = undefined;
+    this._sessionPromise = undefined;
+    if (this._currentView) {
+      this._currentView.webview.postMessage({ type: "newSession" });
+    }
+  }
+
   resolveWebviewView(webviewView: vscode.WebviewView): void {
     // Tear down any previous subscription and session
     this._unsubscribe?.();

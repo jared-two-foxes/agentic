@@ -13,7 +13,14 @@ export function activate(context: vscode.ExtensionContext): void {
   };
 
   context.subscriptions.push(
-    vscode.window.registerWebviewViewProvider(ChatPanel.viewId, provider)
+    vscode.window.registerWebviewViewProvider(ChatPanel.viewId, provider),
+    vscode.commands.registerCommand("opencode.startChat", () => {
+      vscode.commands.executeCommand("opencode.chatView.focus");
+    }),
+    vscode.commands.registerCommand("opencode.newSession", () => {
+      provider.resetSession();
+      vscode.commands.executeCommand("opencode.chatView.focus");
+    })
   );
 
   serverManager.start().catch(() => {});

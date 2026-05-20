@@ -115,14 +115,14 @@ Connect the API client to the Svelte UI via `postMessage`.
 
 Polish and distribute.
 
-- [ ] Register commands in `package.json` under `contributes.commands`:
+- [x] Register commands in `package.json` under `contributes.commands`:
   - `opencode.startChat` — reveal/focus the sidebar panel
   - `opencode.newSession` — create a new session and reset the chat UI
-- [ ] Add a keyboard shortcut for `opencode.startChat` (e.g., `Ctrl+Shift+O`)
-- [ ] Wire `opencode.newSession` command handler in `extension.ts`
-- [ ] Fill in `package.json` metadata: `displayName`, `description`, `icon`, `categories`, `repository`
-- [ ] Add `.vscodeignore` to exclude `node_modules`, `src/`, `webview/`, `scripts/`, `scratch-notes/`
-- [ ] Run `vsce package` and confirm a `.vsix` installs and activates cleanly
+- [x] Add a keyboard shortcut for `opencode.startChat` (e.g., `Ctrl+Shift+O`)
+- [x] Wire `opencode.newSession` command handler in `extension.ts`
+- [x] Fill in `package.json` metadata: `displayName`, `description`, `icon`, `categories`, `repository`
+- [x] Add `.vscodeignore` to exclude `node_modules`, `src/`, `webview/`, `scripts/`, `scratch-notes/`
+- [x] Run `vsce package` and confirm a `.vsix` installs and activates cleanly
 
 **Acceptance:** `opencode-vscode-0.0.1.vsix` installs via "Install from VSIX" and the full chat flow works.
 

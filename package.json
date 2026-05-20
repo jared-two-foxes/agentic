@@ -1,8 +1,18 @@
 {
   "name": "opencode-vscode",
   "displayName": "opencode",
-  "description": "opencode VSCode extension",
+  "description": "AI coding assistant powered by opencode — chat with your codebase from the sidebar.",
   "version": "0.0.1",
+  "publisher": "opencode-dev",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/opencode-dev/opencode-vscode"
+  },
+  "categories": [
+    "Machine Learning",
+    "Chat",
+    "Other"
+  ],
   "engines": {
     "vscode": "^1.85.0"
   },
@@ -14,8 +24,21 @@
   "contributes": {
     "commands": [
       {
-        "command": "opencode.open",
-        "title": "Open opencode"
+        "command": "opencode.startChat",
+        "title": "opencode: Start Chat",
+        "category": "opencode"
+      },
+      {
+        "command": "opencode.newSession",
+        "title": "opencode: New Session",
+        "category": "opencode"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "opencode.startChat",
+        "key": "ctrl+shift+alt+o",
+        "mac": "cmd+shift+alt+o"
       }
     ],
     "viewsContainers": {
@@ -57,7 +80,7 @@
     "build:ext": "node esbuild.mjs",
     "build": "npm run build:webview && npm run build:ext",
     "watch": "node esbuild.mjs --watch",
-    "package": "vsce package",
+    "package": "npx vsce package",
     "gen:api": "node scripts/gen-api.mjs"
   },
   "devDependencies": {
