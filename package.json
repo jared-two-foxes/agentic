@@ -57,9 +57,11 @@
     "build:ext": "node esbuild.mjs",
     "build": "npm run build:webview && npm run build:ext",
     "watch": "node esbuild.mjs --watch",
-    "package": "vsce package"
+    "package": "vsce package",
+    "gen:api": "node scripts/gen-api.mjs"
   },
   "devDependencies": {
+    "openapi-typescript": "^7.0.0",
     "@sveltejs/vite-plugin-svelte": "^3.0.0",
     "@types/node": "^25.9.1",
     "@types/vscode": "^1.85.0",

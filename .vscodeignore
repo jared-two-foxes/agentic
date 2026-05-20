@@ -5,3 +5,4 @@ scripts/
 scratch-notes/
 .vscode/
 *.map
+src/client/generated/

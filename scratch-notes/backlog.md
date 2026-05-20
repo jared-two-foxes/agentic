@@ -60,16 +60,16 @@ Auto-start `opencode serve` and manage its lifetime.
 
 Generate a typed TypeScript client from the OpenAPI spec exposed by `opencode serve`.
 
-- [ ] Add `openapi-typescript` as a dev dependency
-- [ ] Write `scripts/gen-api.ts` (or an npm script) that:
+- [x] Add `openapi-typescript` as a dev dependency
+- [x] Write `scripts/gen-api.ts` (or an npm script) that:
   - Fetches `http://localhost:4096/doc`
   - Runs `openapi-typescript` to emit `src/client/generated/api.ts`
-- [ ] Add `npm run gen:api` script; add `src/client/generated/` to `.gitignore`
-- [ ] Create `src/client/api.ts` wrapping the generated types with helpers:
+- [x] Add `npm run gen:api` script; add `src/client/generated/` to `.gitignore`
+- [x] Create `src/client/api.ts` wrapping the generated types with helpers:
   - `createSession(): Promise<string>` — `POST /session`, returns session ID
   - `sendMessage(sessionId: string, prompt: string): Promise<void>` — `POST /session/:id/message`
   - `subscribeEvents(sessionId: string, onEvent: (e: OpenCodeEvent) => void): () => void` — `GET /session/:id/event` SSE, returns unsubscribe fn
-- [ ] Define a discriminated union type `OpenCodeEvent` covering text delta, tool-call start, tool-call result, and error variants
+- [x] Define a discriminated union type `OpenCodeEvent` covering text delta, tool-call start, tool-call result, and error variants
 
 **Acceptance:** `npm run gen:api` succeeds against a running server; `api.ts` compiles with no type errors.
 
