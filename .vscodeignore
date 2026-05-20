@@ -1,0 +1,7 @@
+node_modules/
+src/
+webview/
+scripts/
+scratch-notes/
+.vscode/
+*.map
