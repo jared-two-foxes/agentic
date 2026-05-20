@@ -8,7 +8,8 @@
   },
   "main": "./dist/extension.js",
   "activationEvents": [
-    "onStartupFinished"
+    "onStartupFinished",
+    "onView:opencode.chatView"
   ],
   "contributes": {
     "commands": [
@@ -16,7 +17,25 @@
         "command": "opencode.open",
         "title": "Open opencode"
       }
-    ]
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "opencode-sidebar",
+          "title": "opencode",
+          "icon": "$(comment-discussion)"
+        }
+      ]
+    },
+    "views": {
+      "opencode-sidebar": [
+        {
+          "type": "webview",
+          "id": "opencode.chatView",
+          "name": "Chat"
+        }
+      ]
+    }
   },
   "scripts": {
     "build:webview": "vite build --config vite.config.mts",
@@ -27,6 +46,7 @@
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^3.0.0",
+    "@types/node": "^25.9.1",
     "@types/vscode": "^1.85.0",
     "esbuild": "^0.20.0",
     "svelte": "^4.0.0",
