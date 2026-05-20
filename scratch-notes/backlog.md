@@ -40,7 +40,7 @@ Wire up the extension host and serve the Svelte app inside a sidebar panel.
 
 Auto-start `opencode serve` and manage its lifetime.
 
-- [ ] Create `src/server.ts` with a `ServerManager` class
+- [x] Create `src/server.ts` with a `ServerManager` class
   - Resolve binary path from user setting `opencode.binaryPath` or `PATH`
   - Read port from user setting `opencode.port` (default `4096`)
   - Spawn `opencode serve --port <port>` as a child process
@@ -48,9 +48,9 @@ Auto-start `opencode serve` and manage its lifetime.
   - Poll `GET http://localhost:<port>/` with exponential backoff (max 10 s) to detect readiness
   - Emit a `serverReady` event / resolve a promise when ready
   - On `deactivate`, send `SIGTERM`; after 2 s force `SIGKILL`
-- [ ] Surface a clear error notification (with install docs link) if the binary is not found
-- [ ] Add VSCode settings contributions to `package.json`: `opencode.port`, `opencode.binaryPath`
-- [ ] Call `ServerManager.start()` from `activate`; call `stop()` from `deactivate`
+- [x] Surface a clear error notification (with install docs link) if the binary is not found
+- [x] Add VSCode settings contributions to `package.json`: `opencode.port`, `opencode.binaryPath`
+- [x] Call `ServerManager.start()` from `activate`; call `stop()` from `deactivate`
 
 **Acceptance:** Activating the extension starts the server process; the Output Channel shows server logs; deactivating kills it cleanly.
 

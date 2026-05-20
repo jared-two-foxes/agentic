@@ -35,6 +35,21 @@
           "name": "Chat"
         }
       ]
+    },
+    "configuration": {
+      "title": "opencode",
+      "properties": {
+        "opencode.port": {
+          "type": "number",
+          "default": 4096,
+          "description": "Port for the opencode server"
+        },
+        "opencode.binaryPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the opencode binary. Leave empty to use PATH."
+        }
+      }
     }
   },
   "scripts": {
