@@ -79,18 +79,18 @@ Generate a typed TypeScript client from the OpenAPI spec exposed by `opencode se
 
 Build the webview frontend.
 
-- [ ] Create `webview/App.svelte` with:
+- [x] Create `webview/App.svelte` with:
   - Scrollable message list (user bubbles, streamed assistant text, collapsed tool-call cards)
   - Text input + "Send" button pinned to the bottom
   - Status indicator: `connecting | ready | error`
-- [ ] Create `webview/main.ts` as the Svelte entry point
-- [ ] Create `webview/index.html` as the Vite entry HTML
-- [ ] Implement the webview message bridge:
+- [x] Create `webview/main.ts` as the Svelte entry point
+- [x] Create `webview/index.html` as the Vite entry HTML
+- [x] Implement the webview message bridge:
   - `acquireVsCodeApi().postMessage({ type: 'send', text })` on submit
   - `window.addEventListener('message', handler)` to receive streamed events from the extension host
   - Append text deltas to the in-progress assistant message reactively
   - Show tool-call events as collapsed `<details>` cards with tool name + JSON summary
-- [ ] Style with minimal CSS (VSCode CSS variables for theming: `--vscode-editor-background`, `--vscode-foreground`, etc.)
+- [x] Style with minimal CSS (VSCode CSS variables for theming: `--vscode-editor-background`, `--vscode-foreground`, etc.)
 
 **Acceptance:** Chat UI renders, input is functional, messages display correctly for both user and assistant turns.
 
