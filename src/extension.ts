@@ -22,6 +22,12 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("opencode.newSession", () => {
       provider.resetSession();
       vscode.commands.executeCommand("opencode.chatView.focus");
+    }),
+    vscode.workspace.onDidChangeWorkspaceFolders(() => {
+      // Reset the chat session immediately so the UI reflects the new folder,
+      // then restart the server so it runs in the new workspace directory.
+      provider.resetSession();
+      serverManager?.restart().catch(() => {});
     })
   );
 

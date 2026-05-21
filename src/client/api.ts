@@ -175,7 +175,7 @@ export class OpenCodeClient {
     });
   }
 
-  async createSession(selection?: CurrentSelection): Promise<string> {
+  async createSession(selection?: CurrentSelection, directory?: string): Promise<string> {
     const body: Record<string, unknown> = {};
     if (selection?.agent) body.agent = selection.agent;
     if (selection?.modelId && selection?.providerID) {
@@ -185,7 +185,8 @@ export class OpenCodeClient {
         ...(selection.variant ? { variant: selection.variant } : {}),
       };
     }
-    const result = (await this.request("POST", "/session", body)) as { id: string };
+    const qs = directory ? `?directory=${encodeURIComponent(directory)}` : "";
+    const result = (await this.request("POST", `/session${qs}`, body)) as { id: string };
     return result.id;
   }
 

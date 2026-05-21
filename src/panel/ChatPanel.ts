@@ -40,7 +40,8 @@ export class ChatPanel implements vscode.WebviewViewProvider {
 
   private _getOrCreateSession(api: OpenCodeClient): Promise<string> {
     if (!this._sessionPromise) {
-      this._sessionPromise = api.createSession(this._selection).then((id) => {
+      const directory = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+      this._sessionPromise = api.createSession(this._selection, directory).then((id) => {
         this._context.workspaceState.update(ChatPanel.SESSION_KEY, id);
         return id;
       }).catch((err) => {

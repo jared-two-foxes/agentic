@@ -20,6 +20,7 @@ export class ServerManager {
     const config = vscode.workspace.getConfiguration("opencode");
     const port: number = config.get("port") ?? 4096;
     const binaryPath: string = config.get("binaryPath") || "opencode";
+    const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
 
     this.outputChannel.show(true);
 
@@ -30,6 +31,7 @@ export class ServerManager {
       try {
         child = cp.spawn(binaryPath, ["serve", "--port", String(port)], {
           stdio: ["ignore", "pipe", "pipe"],
+          ...(cwd ? { cwd } : {}),
         });
       } catch (err) {
         this._handleSpawnError(err, reject);
@@ -61,6 +63,11 @@ export class ServerManager {
         reject(err);
       });
     });
+  }
+
+  async restart(): Promise<void> {
+    await this.stop();
+    await this.start();
   }
 
   private _handleSpawnError(err: unknown, reject: (e: Error) => void): void {
