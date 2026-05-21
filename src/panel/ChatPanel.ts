@@ -3,6 +3,7 @@ import * as crypto from "crypto";
 import * as fs from "fs";
 import * as path from "path";
 import { OpenCodeClient } from "../client/api";
+import type { Agent, Model, CurrentSelection } from "../client/api";
 import { ServerManager, ServerStatus } from "../server";
 
 export class ChatPanel implements vscode.WebviewViewProvider {
@@ -12,6 +13,10 @@ export class ChatPanel implements vscode.WebviewViewProvider {
   private _sessionPromise: Promise<string> | undefined;
   private _currentView: vscode.WebviewView | undefined;
   private _lastStatus: ServerStatus = { value: "connecting" };
+  private _agents: Agent[] = [];
+  private _models: Model[] = [];
+  private _selection: CurrentSelection = {};
+  private _api: OpenCodeClient | undefined;
 
   constructor(
     private readonly extensionUri: vscode.Uri,
@@ -25,11 +30,14 @@ export class ChatPanel implements vscode.WebviewViewProvider {
     if (this._currentView) {
       this._currentView.webview.postMessage({ type: "status", ...status });
     }
+    if (status.value === "ready" && this._currentView) {
+      this._fetchAndPostContext(this._currentView.webview);
+    }
   }
 
   private _getOrCreateSession(api: OpenCodeClient): Promise<string> {
     if (!this._sessionPromise) {
-      this._sessionPromise = api.createSession().catch((err) => {
+      this._sessionPromise = api.createSession(this._selection).catch((err) => {
         this._sessionPromise = undefined;
         throw err;
       });
@@ -37,13 +45,62 @@ export class ChatPanel implements vscode.WebviewViewProvider {
     return this._sessionPromise;
   }
 
+  private async _fetchAndPostContext(webview: vscode.Webview): Promise<void> {
+    if (!this._api) return;
+    try {
+      const [agents, models, config] = await Promise.all([
+        this._api.listAgents(),
+        this._api.listModels(),
+        this._api.getConfig(),
+      ]);
+      this._agents = agents.filter(a => a.mode !== "subagent" && !a.hidden);
+      this._models = models;
+
+      const current: CurrentSelection = {};
+      if (config.default_agent) current.agent = config.default_agent;
+      if (config.model) {
+        const parts = config.model.split("/");
+        if (parts.length >= 2) {
+          current.providerID = parts[0];
+          current.modelId = parts.slice(1).join("/");
+        } else {
+          current.modelId = config.model;
+        }
+      }
+      if (!this._selection.agent) this._selection.agent = current.agent;
+      if (!this._selection.modelId) {
+        this._selection.modelId = current.modelId;
+        this._selection.providerID = current.providerID;
+      }
+
+      webview.postMessage({
+        type: "context",
+        agents: this._agents.map(a => ({ name: a.name, description: a.description })),
+        models: models.map(m => ({
+          id: m.id,
+          providerID: m.providerID,
+          name: m.name,
+          hasVariants: !!(m.variants && Object.keys(m.variants).length > 0),
+          variants: m.variants ? Object.keys(m.variants) : [],
+        })),
+        current: { ...this._selection },
+      });
+    } catch {
+      webview.postMessage({ type: "contextError", message: "Could not load agents/models" });
+    }
+  }
+
   /** Called by opencode.newSession command to clear state and reset the UI */
   resetSession(): void {
     this._unsubscribe?.();
     this._unsubscribe = undefined;
     this._sessionPromise = undefined;
+    this._selection = {};
     if (this._currentView) {
       this._currentView.webview.postMessage({ type: "newSession" });
+      if (this._lastStatus.value === "ready") {
+        this._fetchAndPostContext(this._currentView.webview);
+      }
     }
   }
 
@@ -68,10 +125,115 @@ export class ChatPanel implements vscode.WebviewViewProvider {
     const config = vscode.workspace.getConfiguration("opencode");
     const port: number = config.get("port") ?? 4096;
 
+    // Create an authenticated client for context fetching (same auth as send)
+    // Password is read lazily so we recreate _api when the view resolves.
+    // We store a reference so _fetchAndPostContext can use it.
+    this.secrets.get("opencode.password").then((pw) => {
+      this._api = new OpenCodeClient(`http://localhost:${port}`, pw ?? "");
+      if (this._lastStatus.value === "ready" && this._currentView) {
+        this._fetchAndPostContext(this._currentView.webview);
+      }
+    });
+
+    // Re-post context on reveal
+    webviewView.onDidChangeVisibility(() => {
+      if (webviewView.visible && this._lastStatus.value === "ready") {
+        this._fetchAndPostContext(webviewView.webview);
+      }
+    });
+
     // Handle messages from webview
     webviewView.webview.onDidReceiveMessage(async (msg: { type: string; text?: string }) => {
       if (msg.type === "getStatus") {
         webviewView.webview.postMessage({ type: "status", ...this._lastStatus });
+        if (this._lastStatus.value === "ready") {
+          this._fetchAndPostContext(webviewView.webview);
+        }
+        return;
+      }
+
+      if (msg.type === "pickAgent") {
+        const items = this._agents.map(a => ({
+          label: a.name,
+          description: a.description ?? "",
+        }));
+        const picked = await vscode.window.showQuickPick(items, {
+          title: "Select Agent",
+          placeHolder: "Choose an agent for this session",
+        });
+        if (picked && picked.label !== this._selection.agent) {
+          this._selection.agent = picked.label;
+          // Reset session so next send uses the new agent
+          this._unsubscribe?.();
+          this._unsubscribe = undefined;
+          this._sessionPromise = undefined;
+          webviewView.webview.postMessage({ type: "contextUpdate", agent: picked.label });
+        }
+        return;
+      }
+
+      if (msg.type === "pickModel") {
+        // Show only models with an explicit "active" status (or no status field).
+        const activeOnly = (models: Model[]): Model[] =>
+          models.filter(m => !m.status || m.status === "active");
+
+        // Group models by providerID, inserting separators between groups
+        const grouped = new Map<string, Model[]>();
+        for (const m of activeOnly(this._models)) {
+          const g = grouped.get(m.providerID) ?? [];
+          g.push(m);
+          g.sort((a, b) => (a.name || a.id).localeCompare(b.name || b.id));
+          grouped.set(m.providerID, g);
+        }
+        type ModelItem = vscode.QuickPickItem & { _model?: Model };
+        const items: ModelItem[] = [];
+        for (const [providerID, providerModels] of grouped) {
+          items.push({ label: providerID, kind: vscode.QuickPickItemKind.Separator } as ModelItem);
+          for (const m of providerModels) {
+            items.push({ label: m.name || m.id, _model: m });
+          }
+        }
+        const picked = await vscode.window.showQuickPick(items, {
+          title: "Select Model",
+          placeHolder: "Choose a model for this session",
+        });
+        if (picked && picked._model && (picked._model.id !== this._selection.modelId || picked._model.providerID !== this._selection.providerID)) {
+          this._selection.modelId = picked._model.id;
+          this._selection.providerID = picked._model.providerID;
+          this._selection.variant = undefined;
+          // Reset session so next send uses the new model
+          this._unsubscribe?.();
+          this._unsubscribe = undefined;
+          this._sessionPromise = undefined;
+          webviewView.webview.postMessage({
+            type: "contextUpdate",
+            modelId: picked._model.id,
+            providerID: picked._model.providerID,
+            modelName: picked.label,
+            variants: picked._model.variants ? Object.keys(picked._model.variants) : [],
+          });
+        }
+        return;
+      }
+
+      if (msg.type === "pickVariant") {
+        const model = this._models.find(
+          m => m.id === this._selection.modelId && m.providerID === this._selection.providerID
+        );
+        const variantKeys = model?.variants ? Object.keys(model.variants) : [];
+        if (variantKeys.length === 0) return;
+        const picked = await vscode.window.showQuickPick(variantKeys, {
+          title: "Select Variant",
+          placeHolder: "Choose a model variant",
+        });
+        if (picked && picked !== this._selection.variant) {
+          this._selection.variant = picked;
+          // Reset session so next send uses the new variant
+          this._unsubscribe?.();
+          this._unsubscribe = undefined;
+          this._sessionPromise = undefined;
+          webviewView.webview.postMessage({ type: "contextUpdate", variant: picked });
+        }
         return;
       }
 
@@ -83,19 +245,37 @@ export class ChatPanel implements vscode.WebviewViewProvider {
 
         const sessionId = await this._getOrCreateSession(api);
 
-        // Subscribe once per session
+        // Subscribe once per session, await stream open before sending
         if (!this._unsubscribe) {
-          this._unsubscribe = api.subscribeEvents(sessionId, (event) => {
-            webviewView.webview.postMessage(event);
-            if (event.type === "session.error") {
-              const errMsg = String((event.properties?.error as Record<string, unknown>)?.message ?? "Session error");
-              webviewView.webview.postMessage({ type: "status", value: "error", message: errMsg });
+          const { ready, unsubscribe } = api.subscribeEvents(
+            sessionId,
+            (event) => {
+              webviewView.webview.postMessage(event);
+            },
+            (err) => {
+              // SSE stream error — surface to UI and clear subscription so
+              // the next send attempt re-subscribes
+              this._unsubscribe = undefined;
+              webviewView.webview.postMessage({
+                type: "status",
+                value: "error",
+                message: err.message,
+              });
             }
-          });
+          );
+          this._unsubscribe = unsubscribe;
+          // Wait until the stream is open before dispatching the message,
+          // so no events are missed due to the race between GET /event and
+          // POST /session/:id/message
+          await ready;
         }
 
         await api.sendMessage(sessionId, msg.text);
       } catch (err: unknown) {
+        // Clear dead session so the next send starts fresh
+        this._unsubscribe?.();
+        this._unsubscribe = undefined;
+        this._sessionPromise = undefined;
         const message = err instanceof Error ? err.message : String(err);
         webviewView.webview.postMessage({ type: "status", value: "error", message });
       }

@@ -1,71 +1,79 @@
 import * as http from "http";
 
 // ---------------------------------------------------------------------------
-// Event types
+// Event types — matching the actual opencode serve SSE event schema
 // ---------------------------------------------------------------------------
 
-export type EventTextDelta = {
-  type: "session.next.text.delta";
-  id: string;
-  properties: { timestamp: number; sessionID: string; delta: string };
-};
-
-export type EventToolCalled = {
-  type: "session.next.tool.called";
+/** Text (or other field) delta streamed from the model */
+export type EventMessagePartDelta = {
+  type: "message.part.delta";
   id: string;
   properties: {
-    timestamp: number;
     sessionID: string;
-    callID: string;
-    tool: string;
-    input: Record<string, unknown>;
-    provider: { executed: boolean };
+    messageID: string;
+    partID: string;
+    field: string;   // "text" | "input" | etc.
+    delta: string;
   };
 };
 
-export type EventToolSuccess = {
-  type: "session.next.tool.success";
-  id: string;
-  properties: {
-    timestamp: number;
-    sessionID: string;
-    callID: string;
-    structured: Record<string, unknown>;
-    provider: { executed: boolean };
-  };
-};
-
-export type EventToolFailed = {
-  type: "session.next.tool.failed";
-  id: string;
-  properties: {
-    timestamp: number;
-    sessionID: string;
-    callID: string;
-    error: Record<string, unknown>;
-    provider: { executed: boolean };
-  };
-};
-
-export type EventSessionError = {
-  type: "session.error";
-  id: string;
-  properties: { sessionID?: string; error: Record<string, unknown> };
-};
-
+/** Session turn complete */
 export type EventSessionIdle = {
   type: "session.idle";
   id: string;
   properties: { sessionID: string };
 };
 
+/** Session busy/idle/error status change */
+export type EventSessionStatus = {
+  type: "session.status";
+  id: string;
+  properties: {
+    sessionID: string;
+    status: { type: "busy" | "idle" | "error"; error?: unknown };
+  };
+};
+
+/** Catch-all for events we don't specifically handle */
 export type OpenCodeEvent =
-  | EventTextDelta
-  | EventToolCalled
-  | EventToolSuccess
-  | EventToolFailed
-  | EventSessionError
-  | EventSessionIdle;
+  | EventMessagePartDelta
+  | EventSessionIdle
+  | EventSessionStatus
+  | { type: string; id: string; properties?: Record<string, unknown> };
+
+// ---------------------------------------------------------------------------
+// Context types (agent / model / config)
+// ---------------------------------------------------------------------------
+
+export type Agent = {
+  name: string;
+  description?: string;
+  mode?: "subagent" | "primary" | "all";
+  hidden?: boolean;
+  model?: { modelID: string; providerID: string };
+  variant?: string;
+};
+
+export type Model = {
+  id: string;
+  providerID: string;
+  name: string;
+  variants?: Record<string, unknown>;
+  status?: "alpha" | "beta" | "deprecated" | "active";
+};
+
+export type Config = {
+  model?: string;        // composite "providerID/modelID" string
+  default_agent?: string;
+};
+
+/** The user's current selection — passed to POST /session as overrides */
+export type CurrentSelection = {
+  agent?: string;        // agent name
+  modelId?: string;      // model id (e.g. "claude-sonnet-4-5")
+  providerID?: string;   // provider id (e.g. "anthropic")
+  variant?: string;      // variant key, if any
+};
 
 // ---------------------------------------------------------------------------
 // Client
@@ -145,11 +153,33 @@ export class OpenCodeClient {
     });
   }
 
-  async createSession(): Promise<string> {
-    const result = (await this.request("POST", "/session", {})) as {
-      id: string;
-    };
+  async createSession(selection?: CurrentSelection): Promise<string> {
+    const body: Record<string, unknown> = {};
+    if (selection?.agent) body.agent = selection.agent;
+    if (selection?.modelId && selection?.providerID) {
+      body.model = {
+        id: selection.modelId,
+        providerID: selection.providerID,
+        ...(selection.variant ? { variant: selection.variant } : {}),
+      };
+    }
+    const result = (await this.request("POST", "/session", body)) as { id: string };
     return result.id;
+  }
+
+  async listAgents(): Promise<Agent[]> {
+    const result = await this.request("GET", "/agent");
+    return Array.isArray(result) ? (result as Agent[]) : [];
+  }
+
+  async listModels(): Promise<Model[]> {
+    const result = await this.request("GET", "/api/model");
+    return Array.isArray(result) ? (result as Model[]) : [];
+  }
+
+  async getConfig(): Promise<Config> {
+    const result = await this.request("GET", "/config");
+    return (result ?? {}) as Config;
   }
 
   async sendMessage(sessionId: string, prompt: string): Promise<void> {
@@ -160,8 +190,9 @@ export class OpenCodeClient {
 
   subscribeEvents(
     sessionId: string,
-    onEvent: (event: OpenCodeEvent) => void
-  ): () => void {
+    onEvent: (event: OpenCodeEvent) => void,
+    onError?: (err: Error) => void
+  ): { ready: Promise<void>; unsubscribe: () => void } {
     let destroyed = false;
     let buffer = "";
 
@@ -180,20 +211,25 @@ export class OpenCodeClient {
 
     let req: http.ClientRequest;
 
-    const promise = new Promise<void>((resolve, reject) => {
+    const ready = new Promise<void>((resolve, reject) => {
       req = http.get(options, (res) => {
         const statusCode = res.statusCode ?? 0;
 
         if (statusCode === 401) {
           res.destroy();
-          return reject(
-            new Error("401 Unauthorized — check opencode.password setting")
-          );
+          const err = new Error("401 Unauthorized — check opencode.password setting");
+          onError?.(err);
+          return reject(err);
         }
         if (statusCode !== 200) {
           res.destroy();
-          return reject(new Error(`HTTP ${statusCode} on /event`));
+          const err = new Error(`HTTP ${statusCode} on /event`);
+          onError?.(err);
+          return reject(err);
         }
+
+        // Stream is open — caller can now safely send the message
+        resolve();
 
         res.on("data", (chunk: Buffer) => {
           // Normalise CRLF → LF so the parser works with both line-ending styles
@@ -204,55 +240,66 @@ export class OpenCodeClient {
             const frame = buffer.slice(0, boundary);
             buffer = buffer.slice(boundary + 2);
 
+            // Collect all data: lines in the frame and join them — handles
+            // multi-line JSON payloads that span several data: lines
+            const dataLines: string[] = [];
             for (const line of frame.split("\n")) {
               if (line.startsWith("data: ")) {
-                const jsonStr = line.slice("data: ".length).trim();
-                if (!jsonStr) continue;
-                try {
-                  const event = JSON.parse(jsonStr) as {
-                    id: string;
-                    type: string;
-                    properties?: Record<string, unknown>;
-                  };
-
-                  // Filter: only drop events where properties.sessionID is
-                  // defined AND does not match the target sessionId.
-                  const sid = event.properties?.sessionID;
-                  if (sid !== undefined && sid !== sessionId) {
-                    continue;
-                  }
-
-                  onEvent(event as unknown as OpenCodeEvent);
-                } catch {
-                  // ignore malformed frames
-                }
+                dataLines.push(line.slice("data: ".length));
               }
+            }
+            if (dataLines.length === 0) continue;
+
+            const jsonStr = dataLines.join("").trim();
+            if (!jsonStr) continue;
+
+            try {
+              const event = JSON.parse(jsonStr) as {
+                id: string;
+                type: string;
+                properties?: Record<string, unknown>;
+              };
+
+              // Filter: only drop events where properties.sessionID is
+              // defined AND does not match the target sessionId.
+              const sid = event.properties?.sessionID;
+              if (sid !== undefined && sid !== sessionId) {
+                continue;
+              }
+
+              onEvent(event as unknown as OpenCodeEvent);
+            } catch {
+              // ignore malformed frames
             }
           }
         });
 
-        res.on("end", resolve);
+        res.on("end", () => {
+          if (!destroyed) {
+            onError?.(new Error("SSE stream closed unexpectedly"));
+          }
+        });
         res.on("error", (err) => {
           if (!destroyed) {
-            console.error("SSE stream error:", err);
+            onError?.(err);
           }
         });
       });
 
       req.on("error", (err) => {
         if (!destroyed) {
+          onError?.(err);
           reject(err);
         }
       });
     });
 
-    // Suppress unhandled rejection — callers use the unsubscribe fn, not the promise
-    promise.catch(() => {});
-
-    return () => {
+    const unsubscribe = () => {
       destroyed = true;
       buffer = "";
-      req.destroy();
+      req?.destroy();
     };
+
+    return { ready, unsubscribe };
   }
 }
