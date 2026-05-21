@@ -216,7 +216,7 @@ export class ChatPanel implements vscode.WebviewViewProvider {
     // We store a reference so _fetchAndPostContext can use it.
     this.secrets.get("opencode.password").then((pw) => {
       this._api = new OpenCodeClient(`http://localhost:${port}`, pw ?? "");
-      if (this._lastStatus.value === "ready" && this._currentView) {
+      if (this._lastStatus.value === "ready" && this._currentView && !this._sessionPromise) {
         this._fetchAndPostContext(this._currentView.webview);
       }
     });
