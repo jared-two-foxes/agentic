@@ -17,6 +17,11 @@
   type AssistantMessage = { kind: 'assistant'; id: string; parts: AssistantPart[] };
   type Message = UserMessage | AssistantMessage;
 
+  type QuestionOption   = { label: string; description: string };
+  type QuestionInfo     = { question: string; header: string; options: QuestionOption[]; multiple?: boolean; custom?: boolean };
+  type QuestionRequest  = { id: string; sessionID: string; questions: QuestionInfo[] };
+  type PermissionRequest = { id: string; sessionID: string; permission: string; patterns: string[] };
+
   // VSCode API (cached)
   const vscode = acquireVsCodeApi();
 
@@ -26,6 +31,12 @@
   let status: 'connecting' | 'ready' | 'error' = 'connecting';
   let statusMessage = '';
   let messageListEl: HTMLElement;
+
+  // Pending question / permission state
+  let pendingQuestion: QuestionRequest | null = null;
+  let questionAnswers: string[][] = [];   // one entry per QuestionInfo; each is array of selected labels
+  let customAnswers: string[] = [];       // free-text per QuestionInfo when custom: true
+  let pendingPermission: PermissionRequest | null = null;
 
   // Context bar state
   type AgentInfo = { name: string; description?: string };
@@ -52,8 +63,8 @@
   let historyCursor = 0;   // index into historyStack; historyStack.length = live
   let historySaved = '';   // saves the live draft when the user starts navigating up
 
-  // Reactive: disable send when input is empty or not ready
-  $: canSend = inputText.trim().length > 0 && status === 'ready';
+  // Reactive: disable send when input is empty, not ready, or a card is awaiting response
+  $: canSend = inputText.trim().length > 0 && status === 'ready' && !pendingQuestion && !pendingPermission;
 
   // Scroll-to-bottom: only if already near the bottom (within 80px)
   let _shouldStick = true;
@@ -93,6 +104,61 @@
     messages = [...messages];
     scrollToBottom();
   }
+
+  // ── Question card helpers ────────────────────────────────────────────────
+
+  function toggleQuestionOption(qIdx: number, label: string, multiple: boolean) {
+    const current = questionAnswers[qIdx] ?? [];
+    if (multiple) {
+      questionAnswers[qIdx] = current.includes(label)
+        ? current.filter(l => l !== label)
+        : [...current, label];
+    } else {
+      questionAnswers[qIdx] = current[0] === label ? [] : [label];
+    }
+    questionAnswers = [...questionAnswers];
+  }
+
+  $: questionReady = pendingQuestion !== null && pendingQuestion.questions.every((q, i) => {
+    if (q.custom) {
+      // custom: accept either a selected option OR a non-empty free-text answer
+      return (questionAnswers[i]?.length ?? 0) > 0 || (customAnswers[i]?.trim().length ?? 0) > 0;
+    }
+    return (questionAnswers[i]?.length ?? 0) > 0;
+  });
+
+  function submitQuestion() {
+    if (!pendingQuestion || !questionReady) return;
+    // Merge custom free-text into answers: if no option selected but custom text present, use it
+    const finalAnswers = pendingQuestion.questions.map((q, i) => {
+      if (q.custom && (questionAnswers[i]?.length ?? 0) === 0 && customAnswers[i]?.trim()) {
+        return [customAnswers[i].trim()];
+      }
+      return questionAnswers[i] ?? [];
+    });
+    vscode.postMessage({ type: 'questionReply', requestID: pendingQuestion.id, answers: finalAnswers });
+    pendingQuestion = null;
+    questionAnswers = [];
+    customAnswers   = [];
+  }
+
+  function rejectQuestion() {
+    if (!pendingQuestion) return;
+    vscode.postMessage({ type: 'questionReject', requestID: pendingQuestion.id });
+    pendingQuestion = null;
+    questionAnswers = [];
+    customAnswers   = [];
+  }
+
+  // ── Permission card helpers ──────────────────────────────────────────────
+
+  function replyPermission(reply: 'once' | 'always' | 'reject') {
+    if (!pendingPermission) return;
+    vscode.postMessage({ type: 'permissionReply', requestID: pendingPermission.id, reply });
+    pendingPermission = null;
+  }
+
+  // ── Send ─────────────────────────────────────────────────────────────────
 
   function handleSend() {
     const text = inputText.trim();
@@ -187,6 +253,36 @@
           }
           break;
         }
+        case 'question.asked': {
+          const props = data.properties as QuestionRequest | undefined;
+          if (props && Array.isArray(props.questions)) {
+            pendingQuestion = props;
+            questionAnswers = props.questions.map(() => []);
+            customAnswers   = props.questions.map(() => '');
+            scrollToBottom();
+          }
+          break;
+        }
+        case 'question.replied':
+        case 'question.rejected': {
+          pendingQuestion = null;
+          questionAnswers = [];
+          customAnswers   = [];
+          break;
+        }
+        case 'permission.asked': {
+          const props = data.properties as PermissionRequest | undefined;
+          if (props && props.id) {
+            pendingPermission = props;
+            scrollToBottom();
+          }
+          break;
+        }
+        case 'permission.replied':
+        case 'permission.rejected': {
+          pendingPermission = null;
+          break;
+        }
         case 'session.idle': {
           // assistant turn complete — nothing special needed for v1
           break;
@@ -200,6 +296,11 @@
           historyCursor = 0;
           historySaved = '';
           inputText = '';
+          // Clear any pending cards
+          pendingQuestion = null;
+          questionAnswers = [];
+          customAnswers   = [];
+          pendingPermission = null;
           // Reset context selections (will be re-fetched when server confirms ready)
           currentAgent = undefined;
           currentModelId = undefined;
@@ -329,6 +430,71 @@
     {/each}
   </div>
 
+  <!-- Question card -->
+  {#if pendingQuestion}
+    <div class="prompt-card question-card">
+      <div class="card-header">
+        <span class="card-icon">?</span>
+        <span class="card-title">Question{pendingQuestion.questions.length > 1 ? 's' : ''}</span>
+      </div>
+      {#each pendingQuestion.questions as qi, i}
+        <div class="card-question">
+          {#if qi.header}
+            <div class="card-question-header">{qi.header}</div>
+          {/if}
+          <div class="card-question-body">{qi.question}</div>
+          <div class="card-options">
+            {#each qi.options as opt}
+              <button
+                class="card-option-btn"
+                class:selected={questionAnswers[i]?.includes(opt.label)}
+                title={opt.description}
+                on:click={() => toggleQuestionOption(i, opt.label, qi.multiple ?? false)}
+              >{opt.label}</button>
+            {/each}
+          </div>
+          {#if qi.custom}
+            <input
+              class="card-custom-input"
+              type="text"
+              placeholder="Or type a custom answer…"
+              bind:value={customAnswers[i]}
+            />
+          {/if}
+        </div>
+      {/each}
+      <div class="card-actions">
+        <button class="card-action-primary" disabled={!questionReady} on:click={submitQuestion}>Submit</button>
+        <button class="card-action-secondary" on:click={rejectQuestion}>Cancel</button>
+      </div>
+    </div>
+  {/if}
+
+  <!-- Permission card -->
+  {#if pendingPermission}
+    <div class="prompt-card permission-card">
+      <div class="card-header">
+        <span class="card-icon">⚠</span>
+        <span class="card-title">Permission Request</span>
+      </div>
+      <div class="card-permission-body">
+        <span class="card-permission-name">{pendingPermission.permission}</span>
+        {#if pendingPermission.patterns?.length}
+          <ul class="card-permission-patterns">
+            {#each pendingPermission.patterns as p}
+              <li><code>{p}</code></li>
+            {/each}
+          </ul>
+        {/if}
+      </div>
+      <div class="card-actions">
+        <button class="card-action-primary"   on:click={() => replyPermission('once')}>Allow once</button>
+        <button class="card-action-always"    on:click={() => replyPermission('always')}>Allow always</button>
+        <button class="card-action-secondary" on:click={() => replyPermission('reject')}>Deny</button>
+      </div>
+    </div>
+  {/if}
+
   <!-- Input area -->
   <div class="input-area">
     <textarea
@@ -337,6 +503,7 @@
       bind:value={inputText}
       on:keydown={handleKeydown}
       rows="1"
+      disabled={!!pendingQuestion || !!pendingPermission}
     ></textarea>
     <button
       class="send-button"
@@ -642,5 +809,208 @@
     font-size: 11px;
     padding: 0;
     text-decoration: underline;
+  }
+
+  /* ── Prompt cards (question / permission) ─────────────────────────────── */
+
+  .prompt-card {
+    flex-shrink: 0;
+    margin: 0 12px 8px;
+    border: 1px solid var(--vscode-panel-border, #444);
+    border-radius: 6px;
+    background: var(--vscode-input-background);
+    overflow: hidden;
+  }
+
+  .question-card {
+    border-left: 3px solid var(--vscode-charts-blue, #4fc1ff);
+  }
+
+  .permission-card {
+    border-left: 3px solid var(--vscode-charts-yellow, #e5c07b);
+  }
+
+  .card-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 12px 6px;
+    border-bottom: 1px solid var(--vscode-panel-border, #444);
+  }
+
+  .card-icon {
+    font-size: 13px;
+    opacity: 0.8;
+  }
+
+  .card-title {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    opacity: 0.7;
+  }
+
+  .card-question {
+    padding: 8px 12px 4px;
+  }
+
+  .card-question + .card-question {
+    border-top: 1px solid var(--vscode-panel-border, #333);
+  }
+
+  .card-question-header {
+    font-size: 11px;
+    font-weight: 600;
+    opacity: 0.6;
+    margin-bottom: 2px;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+  }
+
+  .card-question-body {
+    font-size: 13px;
+    line-height: 1.5;
+    margin-bottom: 8px;
+  }
+
+  .card-options {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-bottom: 6px;
+  }
+
+  .card-option-btn {
+    padding: 3px 10px;
+    border-radius: 4px;
+    border: 1px solid var(--vscode-panel-border, #555);
+    background: var(--vscode-editor-background);
+    color: var(--vscode-foreground);
+    font-size: 12px;
+    cursor: pointer;
+    transition: border-color 0.1s, background 0.1s;
+  }
+
+  .card-option-btn:hover {
+    border-color: var(--vscode-focusBorder);
+    background: var(--vscode-list-hoverBackground, var(--vscode-input-background));
+  }
+
+  .card-option-btn.selected {
+    border-color: var(--vscode-charts-blue, #4fc1ff);
+    background: color-mix(in srgb, var(--vscode-charts-blue, #4fc1ff) 15%, transparent);
+    color: var(--vscode-foreground);
+  }
+
+  .card-custom-input {
+    width: 100%;
+    box-sizing: border-box;
+    background: var(--vscode-editor-background);
+    color: var(--vscode-input-foreground, var(--vscode-foreground));
+    border: 1px solid var(--vscode-input-border, transparent);
+    border-radius: 4px;
+    padding: 4px 8px;
+    font-family: inherit;
+    font-size: 12px;
+    margin-bottom: 4px;
+    outline: none;
+  }
+
+  .card-custom-input:focus {
+    border-color: var(--vscode-focusBorder);
+  }
+
+  .card-permission-body {
+    padding: 8px 12px;
+    font-size: 13px;
+    line-height: 1.5;
+  }
+
+  .card-permission-name {
+    font-family: var(--vscode-editor-font-family, monospace);
+    font-size: 12px;
+    background: var(--vscode-textCodeBlock-background, rgba(128,128,128,0.15));
+    border-radius: 3px;
+    padding: 1px 6px;
+  }
+
+  .card-permission-patterns {
+    margin: 6px 0 0 0;
+    padding-left: 1.2em;
+    font-size: 12px;
+    opacity: 0.8;
+  }
+
+  .card-permission-patterns li {
+    margin: 2px 0;
+  }
+
+  .card-permission-patterns code {
+    font-family: var(--vscode-editor-font-family, monospace);
+    font-size: 11px;
+  }
+
+  .card-actions {
+    display: flex;
+    gap: 6px;
+    padding: 8px 12px;
+    border-top: 1px solid var(--vscode-panel-border, #333);
+  }
+
+  .card-action-primary {
+    padding: 4px 12px;
+    border-radius: 4px;
+    border: none;
+    background: var(--vscode-button-background);
+    color: var(--vscode-button-foreground);
+    font-size: 12px;
+    cursor: pointer;
+  }
+
+  .card-action-primary:hover:not(:disabled) {
+    background: var(--vscode-button-hoverBackground, var(--vscode-button-background));
+    filter: brightness(1.1);
+  }
+
+  .card-action-primary:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+
+  .card-action-always {
+    padding: 4px 12px;
+    border-radius: 4px;
+    border: 1px solid var(--vscode-charts-yellow, #e5c07b);
+    background: color-mix(in srgb, var(--vscode-charts-yellow, #e5c07b) 12%, transparent);
+    color: var(--vscode-foreground);
+    font-size: 12px;
+    cursor: pointer;
+  }
+
+  .card-action-always:hover {
+    background: color-mix(in srgb, var(--vscode-charts-yellow, #e5c07b) 22%, transparent);
+  }
+
+  .card-action-secondary {
+    padding: 4px 12px;
+    border-radius: 4px;
+    border: 1px solid var(--vscode-panel-border, #555);
+    background: transparent;
+    color: var(--vscode-foreground);
+    font-size: 12px;
+    cursor: pointer;
+    opacity: 0.8;
+  }
+
+  .card-action-secondary:hover {
+    border-color: var(--vscode-focusBorder);
+    opacity: 1;
+  }
+
+  /* Dim the textarea when a card is blocking input */
+  .chat-input:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
   }
 </style>

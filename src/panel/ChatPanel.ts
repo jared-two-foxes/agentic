@@ -235,7 +235,7 @@ export class ChatPanel implements vscode.WebviewViewProvider {
     });
 
     // Handle messages from webview
-    webviewView.webview.onDidReceiveMessage(async (msg: { type: string; text?: string }) => {
+    webviewView.webview.onDidReceiveMessage(async (msg: { type: string; text?: string; requestID?: string; answers?: unknown; reply?: string; message?: string }) => {
       if (msg.type === "getStatus") {
         webviewView.webview.postMessage({ type: "status", ...this._lastStatus });
         if (this._lastStatus.value === "ready" && !this._sessionPromise) {
@@ -325,6 +325,33 @@ export class ChatPanel implements vscode.WebviewViewProvider {
           this._unsubscribe = undefined;
           this._sessionPromise = undefined;
           webviewView.webview.postMessage({ type: "contextUpdate", variant: picked });
+        }
+        return;
+      }
+
+      if (msg.type === "questionReply") {
+        if (this._api && msg.requestID && Array.isArray(msg.answers)) {
+          this._api.questionReply(msg.requestID as string, msg.answers as string[][]).catch(() => {/* ignore */});
+        }
+        return;
+      }
+
+      if (msg.type === "questionReject") {
+        if (this._api && msg.requestID) {
+          this._api.questionReject(msg.requestID as string).catch(() => {/* ignore */});
+        }
+        return;
+      }
+
+      if (msg.type === "permissionReply") {
+        if (this._api && msg.requestID && msg.reply) {
+          this._api
+            .permissionReply(
+              msg.requestID as string,
+              msg.reply as "once" | "always" | "reject",
+              typeof msg.message === "string" ? msg.message : undefined
+            )
+            .catch(() => {/* ignore */});
         }
         return;
       }

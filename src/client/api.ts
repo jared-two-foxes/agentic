@@ -214,6 +214,25 @@ export class OpenCodeClient {
     return Array.isArray(result) ? (result as SessionMessageItem[]) : [];
   }
 
+  async questionReply(requestID: string, answers: string[][]): Promise<void> {
+    await this.request("POST", `/question/${requestID}/reply`, { answers });
+  }
+
+  async questionReject(requestID: string): Promise<void> {
+    await this.request("POST", `/question/${requestID}/reject`);
+  }
+
+  async permissionReply(
+    requestID: string,
+    reply: "once" | "always" | "reject",
+    message?: string
+  ): Promise<void> {
+    await this.request("POST", `/permission/${requestID}/reply`, {
+      reply,
+      ...(message !== undefined ? { message } : {}),
+    });
+  }
+
   async sendMessage(sessionId: string, prompt: string): Promise<void> {
     await this.request("POST", `/session/${sessionId}/message`, {
       parts: [{ type: "text", text: prompt }],
