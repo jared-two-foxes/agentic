@@ -13,7 +13,9 @@ export function activate(context: vscode.ExtensionContext): void {
   };
 
   context.subscriptions.push(
-    vscode.window.registerWebviewViewProvider(ChatPanel.viewId, provider),
+    vscode.window.registerWebviewViewProvider(ChatPanel.viewId, provider, {
+      webviewOptions: { retainContextWhenHidden: true },
+    }),
     vscode.commands.registerCommand("opencode.startChat", () => {
       vscode.commands.executeCommand("opencode.chatView.focus");
     }),

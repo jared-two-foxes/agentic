@@ -183,10 +183,14 @@ export class ChatPanel implements vscode.WebviewViewProvider {
   }
 
   resolveWebviewView(webviewView: vscode.WebviewView): void {
-    // Tear down any previous subscription and session
-    this._unsubscribe?.();
-    this._unsubscribe = undefined;
-    this._sessionPromise = undefined;
+    // Only tear down if this is a genuinely new webview instance replacing a previous one.
+    // Re-reveals of the same panel must not clear the session.
+    const isNewInstance = this._currentView !== webviewView;
+    if (isNewInstance) {
+      this._unsubscribe?.();
+      this._unsubscribe = undefined;
+      this._sessionPromise = undefined;
+    }
 
     this._currentView = webviewView;
 
@@ -194,7 +198,11 @@ export class ChatPanel implements vscode.WebviewViewProvider {
       enableScripts: true,
       localResourceRoots: [vscode.Uri.joinPath(this.extensionUri, "dist", "webview")],
     };
-    webviewView.webview.html = this._getHtml(webviewView.webview);
+
+    // Only inject HTML on a new instance — re-injecting destroys webview state.
+    if (isNewInstance) {
+      webviewView.webview.html = this._getHtml(webviewView.webview);
+    }
 
     // Post current server status immediately
     webviewView.webview.postMessage({ type: "status", ...this._lastStatus });
@@ -215,8 +223,14 @@ export class ChatPanel implements vscode.WebviewViewProvider {
 
     // Re-post context on reveal
     webviewView.onDidChangeVisibility(() => {
-      if (webviewView.visible && this._lastStatus.value === "ready") {
+      if (!webviewView.visible) return;
+      if (this._lastStatus.value !== "ready") return;
+      // If no session is active yet, fetch context (which will attempt restore).
+      // If a session is already live, just re-send status so the input stays enabled.
+      if (!this._sessionPromise) {
         this._fetchAndPostContext(webviewView.webview);
+      } else {
+        webviewView.webview.postMessage({ type: "status", ...this._lastStatus });
       }
     });
 
@@ -224,7 +238,7 @@ export class ChatPanel implements vscode.WebviewViewProvider {
     webviewView.webview.onDidReceiveMessage(async (msg: { type: string; text?: string }) => {
       if (msg.type === "getStatus") {
         webviewView.webview.postMessage({ type: "status", ...this._lastStatus });
-        if (this._lastStatus.value === "ready") {
+        if (this._lastStatus.value === "ready" && !this._sessionPromise) {
           this._fetchAndPostContext(webviewView.webview);
         }
         return;
