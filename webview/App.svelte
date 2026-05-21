@@ -209,6 +209,26 @@
           contextError = undefined;
           break;
         }
+        case 'sessionRestored': {
+          messages = Array.isArray(data.messages) ? data.messages : [];
+          // Reset prompt history for the restored session
+          historyStack = [];
+          historyCursor = 0;
+          historySaved = '';
+          inputText = '';
+          status = 'ready';
+          statusMessage = '';
+          const cur = data.current ?? {};
+          if (cur.agent) currentAgent = cur.agent;
+          if (cur.modelId) {
+            currentModelId = cur.modelId;
+            currentProviderID = cur.providerID;
+            currentModelName = models.find(m => m.id === cur.modelId && m.providerID === cur.providerID)?.name ?? cur.modelId;
+          }
+          currentVariant = cur.variant;
+          scrollToBottom();
+          break;
+        }
         case 'context': {
           agents = Array.isArray(data.agents) ? data.agents : [];
           models = Array.isArray(data.models) ? data.models : [];

@@ -6,7 +6,7 @@ let serverManager: ServerManager | undefined;
 
 export function activate(context: vscode.ExtensionContext): void {
   serverManager = new ServerManager();
-  const provider = new ChatPanel(context.extensionUri, serverManager, context.secrets);
+  const provider = new ChatPanel(context.extensionUri, serverManager, context.secrets, context);
 
   serverManager.onStatusChange = (status) => {
     provider.notifyStatus(status);

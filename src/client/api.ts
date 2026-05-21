@@ -75,6 +75,28 @@ export type CurrentSelection = {
   variant?: string;      // variant key, if any
 };
 
+/** Minimal session descriptor returned by GET /session */
+export type SessionInfo = {
+  id: string;
+  title: string;
+  directory: string;
+  time: { created: number; updated: number };
+};
+
+/** A text part inside a historical session message */
+export type SessionTextPart = {
+  id: string;
+  messageID: string;
+  type: "text";
+  text: string;
+};
+
+/** One item from GET /session/:id/message */
+export type SessionMessageItem = {
+  info: { id: string; role: "user" | "assistant" };
+  parts: Array<{ id: string; messageID: string; type: string; text?: string }>;
+};
+
 // ---------------------------------------------------------------------------
 // Client
 // ---------------------------------------------------------------------------
@@ -180,6 +202,16 @@ export class OpenCodeClient {
   async getConfig(): Promise<Config> {
     const result = await this.request("GET", "/config");
     return (result ?? {}) as Config;
+  }
+
+  async listSessions(): Promise<SessionInfo[]> {
+    const result = await this.request("GET", "/session");
+    return Array.isArray(result) ? (result as SessionInfo[]) : [];
+  }
+
+  async getSessionMessages(sessionId: string, limit = 50): Promise<SessionMessageItem[]> {
+    const result = await this.request("GET", `/session/${sessionId}/message?limit=${limit}`);
+    return Array.isArray(result) ? (result as SessionMessageItem[]) : [];
   }
 
   async sendMessage(sessionId: string, prompt: string): Promise<void> {

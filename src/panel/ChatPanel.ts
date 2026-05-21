@@ -3,7 +3,7 @@ import * as crypto from "crypto";
 import * as fs from "fs";
 import * as path from "path";
 import { OpenCodeClient } from "../client/api";
-import type { Agent, Model, CurrentSelection } from "../client/api";
+import type { Agent, Model, CurrentSelection, SessionMessageItem } from "../client/api";
 import { ServerManager, ServerStatus } from "../server";
 
 export class ChatPanel implements vscode.WebviewViewProvider {
@@ -18,10 +18,13 @@ export class ChatPanel implements vscode.WebviewViewProvider {
   private _selection: CurrentSelection = {};
   private _api: OpenCodeClient | undefined;
 
+  private static readonly SESSION_KEY = "opencode.sessionId";
+
   constructor(
     private readonly extensionUri: vscode.Uri,
     private readonly serverManager: ServerManager,
-    private readonly secrets: vscode.SecretStorage
+    private readonly secrets: vscode.SecretStorage,
+    private readonly _context: vscode.ExtensionContext
   ) {}
 
   /** Called by extension.ts when server status changes */
@@ -37,7 +40,10 @@ export class ChatPanel implements vscode.WebviewViewProvider {
 
   private _getOrCreateSession(api: OpenCodeClient): Promise<string> {
     if (!this._sessionPromise) {
-      this._sessionPromise = api.createSession(this._selection).catch((err) => {
+      this._sessionPromise = api.createSession(this._selection).then((id) => {
+        this._context.workspaceState.update(ChatPanel.SESSION_KEY, id);
+        return id;
+      }).catch((err) => {
         this._sessionPromise = undefined;
         throw err;
       });
@@ -85,8 +91,79 @@ export class ChatPanel implements vscode.WebviewViewProvider {
         })),
         current: { ...this._selection },
       });
+
+      // Attempt to restore the previous session (only when no session is active yet)
+      if (!this._sessionPromise) {
+        await this._tryRestoreSession(webview);
+      }
     } catch {
       webview.postMessage({ type: "contextError", message: "Could not load agents/models" });
+    }
+  }
+
+  /** Convert raw server message history to the shape the webview expects */
+  private _mapToWebviewMessages(history: SessionMessageItem[]): unknown[] {
+    let idCounter = 0;
+    const uid = () => `r${++idCounter}`;
+
+    const result: unknown[] = [];
+    for (const item of history) {
+      const { info, parts } = item;
+      const textParts = parts.filter(p => p.type === "text" && typeof p.text === "string");
+      if (info.role === "user") {
+        const text = textParts.map(p => p.text ?? "").join("").trim();
+        if (!text) continue;
+        result.push({ kind: "user", id: uid(), text });
+      } else if (info.role === "assistant") {
+        if (textParts.length === 0) continue;
+        result.push({
+          kind: "assistant",
+          id: uid(),
+          parts: textParts.map(p => ({ type: "text", partID: p.id, text: p.text ?? "" })),
+        });
+      }
+    }
+    return result;
+  }
+
+  /** Try to re-attach to the last session for this workspace. Returns true if restored. */
+  private async _tryRestoreSession(webview: vscode.Webview): Promise<boolean> {
+    if (!this._api) return false;
+    const savedId = this._context.workspaceState.get<string>(ChatPanel.SESSION_KEY);
+    if (!savedId) return false;
+
+    try {
+      // Confirm the session still exists on the server
+      const sessions = await this._api.listSessions();
+      const session = sessions.find(s => s.id === savedId);
+      if (!session) {
+        this._context.workspaceState.update(ChatPanel.SESSION_KEY, undefined);
+        return false;
+      }
+
+      // Workspace guard — reject sessions from a different directory
+      const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+      if (workspaceRoot && session.directory !== workspaceRoot) {
+        return false;
+      }
+
+      // Re-attach session promise so the next send goes to the same session
+      this._sessionPromise = Promise.resolve(savedId);
+
+      // Fetch history (capped at 50 messages)
+      const history = await this._api.getSessionMessages(savedId, 50);
+      const messages = this._mapToWebviewMessages(history);
+
+      webview.postMessage({
+        type: "sessionRestored",
+        messages,
+        current: { ...this._selection },
+      });
+
+      return true;
+    } catch {
+      // Non-fatal — fall through to a blank session
+      return false;
     }
   }
 
@@ -96,6 +173,7 @@ export class ChatPanel implements vscode.WebviewViewProvider {
     this._unsubscribe = undefined;
     this._sessionPromise = undefined;
     this._selection = {};
+    this._context.workspaceState.update(ChatPanel.SESSION_KEY, undefined);
     if (this._currentView) {
       this._currentView.webview.postMessage({ type: "newSession" });
       if (this._lastStatus.value === "ready") {
