@@ -205,14 +205,28 @@ export class OpenCodeClient {
     return (result ?? {}) as Config;
   }
 
-  async listSessions(): Promise<SessionInfo[]> {
-    const result = await this.request("GET", "/session");
+  async listSessions(directory?: string): Promise<SessionInfo[]> {
+    const qs = directory ? `?directory=${encodeURIComponent(directory)}` : "";
+    const result = await this.request("GET", `/session${qs}`);
     return Array.isArray(result) ? (result as SessionInfo[]) : [];
   }
 
   async getSessionMessages(sessionId: string, limit = 50): Promise<SessionMessageItem[]> {
     const result = await this.request("GET", `/session/${sessionId}/message?limit=${limit}`);
     return Array.isArray(result) ? (result as SessionMessageItem[]) : [];
+  }
+
+  async deleteSession(sessionId: string): Promise<void> {
+    await this.request("DELETE", `/session/${sessionId}`);
+  }
+
+  async updateSession(sessionId: string, title: string): Promise<void> {
+    await this.request("PATCH", `/session/${sessionId}`, { title });
+  }
+
+  async forkSession(sessionId: string): Promise<string> {
+    const result = (await this.request("POST", `/session/${sessionId}/fork`, {})) as { id: string };
+    return result.id;
   }
 
   async questionReply(requestID: string, answers: string[][]): Promise<void> {
@@ -234,10 +248,20 @@ export class OpenCodeClient {
     });
   }
 
-  async sendMessage(sessionId: string, prompt: string): Promise<void> {
-    await this.request("POST", `/session/${sessionId}/message`, {
+  async revertSession(sessionId: string, messageId: string): Promise<void> {
+    await this.request("POST", `/session/${sessionId}/revert`, { messageID: messageId });
+  }
+
+  async abort(sessionId: string): Promise<void> {
+    await this.request("POST", `/session/${sessionId}/abort`);
+  }
+
+  async sendMessage(sessionId: string, prompt: string, agent?: string): Promise<void> {
+    const body: Record<string, unknown> = {
       parts: [{ type: "text", text: prompt }],
-    });
+    };
+    if (agent) body.agent = agent;
+    await this.request("POST", `/session/${sessionId}/message`, body);
   }
 
   subscribeEvents(

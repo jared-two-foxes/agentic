@@ -19,6 +19,36 @@ export class ChatPanel implements vscode.WebviewViewProvider {
   private _api: OpenCodeClient | undefined;
 
   private static readonly SESSION_KEY = "opencode.sessionId";
+  private static readonly AGENT_KEY   = "opencode.agentSelection";
+
+  /** Returns a workspaceState key scoped to the current workspace root, preventing cross-project bleed. */
+  private _sessionKey(): string {
+    const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    return root
+      ? `${ChatPanel.SESSION_KEY}:${this._normPath(root)}`
+      : ChatPanel.SESSION_KEY;
+  }
+
+  /** Returns a workspaceState key for persisting agent selection, scoped per workspace. */
+  private _agentKey(): string {
+    const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    return root
+      ? `${ChatPanel.AGENT_KEY}:${this._normPath(root)}`
+      : ChatPanel.AGENT_KEY;
+  }
+
+  /** Persist the current agent selection to workspaceState. */
+  private _saveAgentSelection(): void {
+    this._context.workspaceState.update(this._agentKey(), this._selection.agent ?? null);
+  }
+
+  /** Restore a previously saved agent selection into _selection (before context is posted). */
+  private _restoreAgentSelection(): void {
+    const saved = this._context.workspaceState.get<string>(this._agentKey());
+    if (saved && !this._selection.agent) {
+      this._selection.agent = saved;
+    }
+  }
 
   constructor(
     private readonly extensionUri: vscode.Uri,
@@ -42,7 +72,9 @@ export class ChatPanel implements vscode.WebviewViewProvider {
     if (!this._sessionPromise) {
       const directory = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
       this._sessionPromise = api.createSession(this._selection, directory).then((id) => {
-        this._context.workspaceState.update(ChatPanel.SESSION_KEY, id);
+        this._context.workspaceState.update(this._sessionKey(), id);
+        // Push a fresh session list so the picker reflects the new session immediately.
+        this._pushSessionList(id).catch(() => {});
         return id;
       }).catch((err) => {
         this._sessionPromise = undefined;
@@ -52,7 +84,27 @@ export class ChatPanel implements vscode.WebviewViewProvider {
     return this._sessionPromise;
   }
 
-  private async _fetchAndPostContext(webview: vscode.Webview): Promise<void> {
+  /** Fetch the session list for the current workspace and post it to the webview. */
+  private async _pushSessionList(activeId: string | null): Promise<void> {
+    if (!this._api || !this._currentView) return;
+    try {
+      const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+      const sessions = await this._api.listSessions(workspaceRoot);
+      // Always include the active session even if the server omitted it
+      let result = sessions;
+      if (activeId && !result.find(s => s.id === activeId)) {
+        const all = await this._api.listSessions();
+        const active = all.find(s => s.id === activeId);
+        if (active) result = [active, ...result];
+      }
+      result.sort((a, b) => (b.time?.updated ?? 0) - (a.time?.updated ?? 0));
+      this._currentView.webview.postMessage({ type: "sessionList", sessions: result, activeId });
+    } catch {
+      this._currentView.webview.postMessage({ type: "sessionList", sessions: [], activeId });
+    }
+  }
+
+  private async _fetchAndPostContext(webview: vscode.Webview, attemptRestore = true): Promise<void> {
     if (!this._api) return;
     try {
       const [agents, models, config] = await Promise.all([
@@ -75,6 +127,16 @@ export class ChatPanel implements vscode.WebviewViewProvider {
         }
       }
       if (!this._selection.agent) this._selection.agent = current.agent;
+      // Restore persisted agent selection if nothing is set from config
+      this._restoreAgentSelection();
+      // If the (restored) agent has a model preference, apply it when no model is explicitly set
+      if (this._selection.agent && !this._selection.modelId) {
+        const agentDef = this._agents.find(a => a.name === this._selection.agent);
+        if (agentDef?.model) {
+          current.modelId = agentDef.model.modelID;
+          current.providerID = agentDef.model.providerID;
+        }
+      }
       if (!this._selection.modelId) {
         this._selection.modelId = current.modelId;
         this._selection.providerID = current.providerID;
@@ -82,7 +144,7 @@ export class ChatPanel implements vscode.WebviewViewProvider {
 
       webview.postMessage({
         type: "context",
-        agents: this._agents.map(a => ({ name: a.name, description: a.description })),
+        agents: this._agents.map(a => ({ name: a.name, description: a.description, model: a.model })),
         models: models.map(m => ({
           id: m.id,
           providerID: m.providerID,
@@ -94,7 +156,7 @@ export class ChatPanel implements vscode.WebviewViewProvider {
       });
 
       // Attempt to restore the previous session (only when no session is active yet)
-      if (!this._sessionPromise) {
+      if (attemptRestore && !this._sessionPromise) {
         await this._tryRestoreSession(webview);
       }
     } catch {
@@ -114,7 +176,7 @@ export class ChatPanel implements vscode.WebviewViewProvider {
       if (info.role === "user") {
         const text = textParts.map(p => p.text ?? "").join("").trim();
         if (!text) continue;
-        result.push({ kind: "user", id: uid(), text });
+        result.push({ kind: "user", id: uid(), serverId: info.id, text });
       } else if (info.role === "assistant") {
         if (textParts.length === 0) continue;
         result.push({
@@ -127,32 +189,58 @@ export class ChatPanel implements vscode.WebviewViewProvider {
     return result;
   }
 
+  /** Normalise a filesystem path for comparison: lowercase on Windows, strip trailing separator */
+  private _normPath(p: string): string {
+    let s = p.replace(/[\\/]+$/, ""); // strip trailing slashes
+    if (process.platform === "win32") s = s.toLowerCase();
+    return s;
+  }
+
   /** Try to re-attach to the last session for this workspace. Returns true if restored. */
   private async _tryRestoreSession(webview: vscode.Webview): Promise<boolean> {
     if (!this._api) return false;
-    const savedId = this._context.workspaceState.get<string>(ChatPanel.SESSION_KEY);
-    if (!savedId) return false;
+    const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+
+    // Set a sentinel immediately — before any await — so concurrent calls
+    // to _fetchAndPostContext see a non-null _sessionPromise and bail out.
+    // We replace it with the real resolved value (or clear it) below.
+    let resolveId!: (id: string) => void;
+    let rejectId!: (e: unknown) => void;
+    this._sessionPromise = new Promise<string>((res, rej) => {
+      resolveId = res;
+      rejectId = rej;
+    });
+    // Suppress unhandled-rejection noise during the async window
+    this._sessionPromise.catch(() => {});
 
     try {
-      // Confirm the session still exists on the server
-      const sessions = await this._api.listSessions();
-      const session = sessions.find(s => s.id === savedId);
-      if (!session) {
-        this._context.workspaceState.update(ChatPanel.SESSION_KEY, undefined);
+      const sessions = await this._api.listSessions(workspaceRoot);
+
+      // 1. Prefer the session key scoped to this workspace root.
+      const stateKey = this._sessionKey();
+      const savedId = this._context.workspaceState.get<string>(stateKey);
+      let target = savedId ? sessions.find(s => s.id === savedId) : undefined;
+
+      // 2. Fall back to the most-recently-updated session for this workspace.
+      if (!target && sessions.length > 0) {
+        target = sessions.slice().sort(
+          (a, b) => (b.time?.updated ?? 0) - (a.time?.updated ?? 0)
+        )[0];
+      }
+
+      if (!target) {
+        // Nothing to restore — clear the sentinel so the next send creates fresh.
+        this._sessionPromise = undefined;
+        rejectId(new Error("no session"));
         return false;
       }
 
-      // Workspace guard — reject sessions from a different directory
-      const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-      if (workspaceRoot && session.directory !== workspaceRoot) {
-        return false;
-      }
+      // Persist the resolved session ID under the scoped key.
+      this._context.workspaceState.update(stateKey, target.id);
+      resolveId(target.id);
 
-      // Re-attach session promise so the next send goes to the same session
-      this._sessionPromise = Promise.resolve(savedId);
-
-      // Fetch history (capped at 50 messages)
-      const history = await this._api.getSessionMessages(savedId, 50);
+      // Fetch history (capped at 50 messages).
+      const history = await this._api.getSessionMessages(target.id, 50);
       const messages = this._mapToWebviewMessages(history);
 
       webview.postMessage({
@@ -163,7 +251,9 @@ export class ChatPanel implements vscode.WebviewViewProvider {
 
       return true;
     } catch {
-      // Non-fatal — fall through to a blank session
+      // Non-fatal — clear sentinel so next send can create a fresh session.
+      this._sessionPromise = undefined;
+      rejectId(new Error("restore failed"));
       return false;
     }
   }
@@ -174,11 +264,14 @@ export class ChatPanel implements vscode.WebviewViewProvider {
     this._unsubscribe = undefined;
     this._sessionPromise = undefined;
     this._selection = {};
-    this._context.workspaceState.update(ChatPanel.SESSION_KEY, undefined);
+    this._context.workspaceState.update(this._sessionKey(), undefined);
     if (this._currentView) {
       this._currentView.webview.postMessage({ type: "newSession" });
+      // Re-post current status immediately so the webview doesn't stay stuck
+      // on "connecting" — the server is already up, notifyStatus won't fire again.
+      this._currentView.webview.postMessage({ type: "status", ...this._lastStatus });
       if (this._lastStatus.value === "ready") {
-        this._fetchAndPostContext(this._currentView.webview);
+        this._fetchAndPostContext(this._currentView.webview, false);
       }
     }
   }
@@ -236,12 +329,27 @@ export class ChatPanel implements vscode.WebviewViewProvider {
     });
 
     // Handle messages from webview
-    webviewView.webview.onDidReceiveMessage(async (msg: { type: string; text?: string; requestID?: string; answers?: unknown; reply?: string; message?: string }) => {
+    webviewView.webview.onDidReceiveMessage(async (msg: { type: string; text?: string; requestID?: string; answers?: unknown; reply?: string; message?: string; sessionId?: string; title?: string; editMessageId?: string }) => {
+      if (msg.type === 'abort') {
+        if (this._api) {
+          const sessionId = await this._sessionPromise?.catch(() => undefined);
+          if (sessionId) {
+            this._api.abort(sessionId).catch(() => {/* ignore */});
+          }
+        }
+        return;
+      }
+
       if (msg.type === "getStatus") {
         webviewView.webview.postMessage({ type: "status", ...this._lastStatus });
         if (this._lastStatus.value === "ready" && !this._sessionPromise) {
           this._fetchAndPostContext(webviewView.webview);
         }
+        return;
+      }
+
+      if (msg.type === "newSession") {
+        this.resetSession();
         return;
       }
 
@@ -256,11 +364,21 @@ export class ChatPanel implements vscode.WebviewViewProvider {
         });
         if (picked && picked.label !== this._selection.agent) {
           this._selection.agent = picked.label;
-          // Reset session so next send uses the new agent
-          this._unsubscribe?.();
-          this._unsubscribe = undefined;
-          this._sessionPromise = undefined;
-          webviewView.webview.postMessage({ type: "contextUpdate", agent: picked.label });
+          this._saveAgentSelection();
+          const update: Record<string, unknown> = { type: "contextUpdate", agent: picked.label };
+          // If the agent has a model preference, switch to it automatically
+          const agentDef = this._agents.find(a => a.name === picked.label);
+          if (agentDef?.model) {
+            this._selection.modelId = agentDef.model.modelID;
+            this._selection.providerID = agentDef.model.providerID;
+            update.modelId = agentDef.model.modelID;
+            update.providerID = agentDef.model.providerID;
+            const modelDef = this._models.find(
+              m => m.id === agentDef.model!.modelID && m.providerID === agentDef.model!.providerID
+            );
+            update.modelName = modelDef?.name ?? agentDef.model.modelID;
+          }
+          webviewView.webview.postMessage(update);
         }
         return;
       }
@@ -330,6 +448,102 @@ export class ChatPanel implements vscode.WebviewViewProvider {
         return;
       }
 
+      if (msg.type === "fetchSessions") {
+        if (!this._api) return;
+        const activeId = await this._sessionPromise?.catch(() => undefined);
+        await this._pushSessionList(activeId ?? null);
+        return;
+      }
+
+      if (msg.type === "switchSession") {
+        if (!this._api || !msg.sessionId) return;
+        // Tear down current session without clearing the stored key yet
+        this._unsubscribe?.();
+        this._unsubscribe = undefined;
+        this._sessionPromise = undefined;
+        this._selection = {};
+        // Persist the requested session as the active one
+        this._context.workspaceState.update(this._sessionKey(), msg.sessionId);
+        // Re-subscribe to events for the new session
+        const { ready, unsubscribe } = this._api.subscribeEvents(
+          msg.sessionId,
+          (event) => { webviewView.webview.postMessage(event); },
+          () => { this._unsubscribe = undefined; }
+        );
+        this._unsubscribe = unsubscribe;
+        this._sessionPromise = Promise.resolve(msg.sessionId);
+        try {
+          await ready;
+          const history = await this._api.getSessionMessages(msg.sessionId, 50);
+          const messages = this._mapToWebviewMessages(history);
+          webviewView.webview.postMessage({
+            type: "sessionRestored",
+            messages,
+            current: { ...this._selection },
+          });
+        } catch {
+          webviewView.webview.postMessage({ type: "status", value: "error", message: "Failed to switch session" });
+        }
+        return;
+      }
+
+      if (msg.type === "deleteSession") {
+        if (!this._api || !msg.sessionId) return;
+        try {
+          await this._api.deleteSession(msg.sessionId);
+          // If we deleted the active session, reset to a blank slate
+          const activeId = await this._sessionPromise?.catch(() => undefined);
+          if (activeId === msg.sessionId) {
+            this.resetSession();
+          }
+        } catch { /* ignore */ }
+        const newActiveId = await this._sessionPromise?.catch(() => undefined);
+        await this._pushSessionList(newActiveId ?? null);
+        return;
+      }
+
+      if (msg.type === "renameSession") {
+        if (!this._api || !msg.sessionId || !msg.title) return;
+        try {
+          await this._api.updateSession(msg.sessionId, msg.title);
+        } catch { /* ignore */ }
+        const activeId = await this._sessionPromise?.catch(() => undefined);
+        await this._pushSessionList(activeId ?? null);
+        return;
+      }
+
+      if (msg.type === "forkSession") {
+        if (!this._api || !msg.sessionId) return;
+        try {
+          const newId = await this._api.forkSession(msg.sessionId);
+          // Switch to the forked session
+          this._unsubscribe?.();
+          this._unsubscribe = undefined;
+          this._sessionPromise = undefined;
+          this._selection = {};
+          this._context.workspaceState.update(this._sessionKey(), newId);
+          const { ready, unsubscribe } = this._api.subscribeEvents(
+            newId,
+            (event) => { webviewView.webview.postMessage(event); },
+            () => { this._unsubscribe = undefined; }
+          );
+          this._unsubscribe = unsubscribe;
+          this._sessionPromise = Promise.resolve(newId);
+          await ready;
+          const history = await this._api.getSessionMessages(newId, 50);
+          const messages = this._mapToWebviewMessages(history);
+          webviewView.webview.postMessage({
+            type: "sessionRestored",
+            messages,
+            current: { ...this._selection },
+          });
+          await this._pushSessionList(newId);
+        } catch {
+          webviewView.webview.postMessage({ type: "status", value: "error", message: "Failed to fork session" });
+        }
+        return;
+      }
+
       if (msg.type === "questionReply") {
         if (this._api && msg.requestID && Array.isArray(msg.answers)) {
           this._api.questionReply(msg.requestID as string, msg.answers as string[][]).catch(() => {/* ignore */});
@@ -357,7 +571,8 @@ export class ChatPanel implements vscode.WebviewViewProvider {
         return;
       }
 
-      if (msg.type !== "send" || !msg.text) return;
+      if (msg.type !== "send" && msg.type !== "editMessage") return;
+      if (!msg.text) return;
 
       try {
         const password = await this.secrets.get("opencode.password") ?? "";
@@ -373,8 +588,6 @@ export class ChatPanel implements vscode.WebviewViewProvider {
               webviewView.webview.postMessage(event);
             },
             (err) => {
-              // SSE stream error — surface to UI and clear subscription so
-              // the next send attempt re-subscribes
               this._unsubscribe = undefined;
               webviewView.webview.postMessage({
                 type: "status",
@@ -384,13 +597,14 @@ export class ChatPanel implements vscode.WebviewViewProvider {
             }
           );
           this._unsubscribe = unsubscribe;
-          // Wait until the stream is open before dispatching the message,
-          // so no events are missed due to the race between GET /event and
-          // POST /session/:id/message
           await ready;
         }
 
-        await api.sendMessage(sessionId, msg.text);
+        if (msg.type === "editMessage" && msg.editMessageId) {
+          await api.revertSession(sessionId, msg.editMessageId);
+        }
+
+        await api.sendMessage(sessionId, msg.text, this._selection.agent);
       } catch (err: unknown) {
         // Clear dead session so the next send starts fresh
         this._unsubscribe?.();

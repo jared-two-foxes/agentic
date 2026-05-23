@@ -13,7 +13,7 @@
   // Types
   type TextPart = { type: 'text'; partID: string; text: string };
   type AssistantPart = TextPart;
-  type UserMessage = { kind: 'user'; id: string; text: string };
+  type UserMessage = { kind: 'user'; id: string; serverId?: string; text: string };
   type AssistantMessage = { kind: 'assistant'; id: string; parts: AssistantPart[] };
   type Message = UserMessage | AssistantMessage;
 
@@ -21,6 +21,9 @@
   type QuestionInfo     = { question: string; header: string; options: QuestionOption[]; multiple?: boolean; custom?: boolean };
   type QuestionRequest  = { id: string; sessionID: string; questions: QuestionInfo[] };
   type PermissionRequest = { id: string; sessionID: string; permission: string; patterns: string[] };
+
+  // Session management types
+  type SessionInfo = { id: string; title: string; directory: string; time: { created: number; updated: number } };
 
   // VSCode API (cached)
   const vscode = acquireVsCodeApi();
@@ -38,8 +41,17 @@
   let customAnswers: string[] = [];       // free-text per QuestionInfo when custom: true
   let pendingPermission: PermissionRequest | null = null;
 
+  // Session management state
+  let showSessionPanel = false;
+  let sessionList: SessionInfo[] = [];
+  let sessionListLoading = false;
+  let activeSessionId: string | null = null;
+  let currentSessionTitle: string | undefined = undefined;
+  let renamingId: string | null = null;
+  let renameValue = '';
+
   // Context bar state
-  type AgentInfo = { name: string; description?: string };
+  type AgentInfo = { name: string; description?: string; model?: { modelID: string; providerID: string } };
   type ModelInfo = { id: string; providerID: string; name: string; hasVariants: boolean; variants: string[] };
   let agents: AgentInfo[] = [];
   let models: ModelInfo[] = [];
@@ -64,7 +76,15 @@
   let historySaved = '';   // saves the live draft when the user starts navigating up
 
   // Reactive: disable send when input is empty, not ready, or a card is awaiting response
-  $: canSend = inputText.trim().length > 0 && status === 'ready' && !pendingQuestion && !pendingPermission;
+  $: canSend = inputText.trim().length > 0 && status === 'ready' && !pendingQuestion && !pendingPermission && !isThinking;
+
+  // Whether the model is currently generating a response
+  let isThinking = false;
+
+  // Edit state — set when the user clicks the pencil on a user bubble
+  let editingMessageId: string | null = null;   // local msg.id of the bubble being edited
+  let editingServerId: string | null = null;     // server-side messageID for the revert call
+  let editOriginalText = '';                     // saved so cancel can restore it
 
   // Scroll-to-bottom: only if already near the bottom (within 80px)
   let _shouldStick = true;
@@ -103,6 +123,62 @@
     }
     messages = [...messages];
     scrollToBottom();
+  }
+
+  // ── Session management helpers ───────────────────────────────────────────
+
+  function toggleSessionPanel() {
+    showSessionPanel = !showSessionPanel;
+    if (showSessionPanel) {
+      sessionListLoading = true;
+      renamingId = null;
+      vscode.postMessage({ type: 'fetchSessions' });
+    }
+  }
+
+  function switchSession(id: string) {
+    if (id === activeSessionId) { showSessionPanel = false; return; }
+    vscode.postMessage({ type: 'switchSession', sessionId: id });
+  }
+
+  function deleteSession(id: string) {
+    vscode.postMessage({ type: 'deleteSession', sessionId: id });
+  }
+
+  function startRename(id: string, title: string) {
+    renamingId = id;
+    renameValue = title;
+  }
+
+  function commitRename(id: string) {
+    const trimmed = renameValue.trim();
+    if (trimmed) {
+      vscode.postMessage({ type: 'renameSession', sessionId: id, title: trimmed });
+      // Optimistically update the local list
+      sessionList = sessionList.map(s => s.id === id ? { ...s, title: trimmed } : s);
+      if (id === activeSessionId) currentSessionTitle = trimmed;
+    }
+    renamingId = null;
+  }
+
+  function forkSession(id: string) {
+    showSessionPanel = false;
+    vscode.postMessage({ type: 'forkSession', sessionId: id });
+  }
+
+  function relativeTime(ts: number): string {
+    const diff = Date.now() - ts;
+    const mins  = Math.floor(diff / 60_000);
+    const hours = Math.floor(diff / 3_600_000);
+    const days  = Math.floor(diff / 86_400_000);
+    if (mins  < 1)  return 'just now';
+    if (mins  < 60) return `${mins}m ago`;
+    if (hours < 24) return `${hours}h ago`;
+    return `${days}d ago`;
+  }
+
+  function handleSessionPanelKeydown(e: KeyboardEvent) {
+    if (e.key === 'Escape') { showSessionPanel = false; renamingId = null; }
   }
 
   // ── Question card helpers ────────────────────────────────────────────────
@@ -160,16 +236,51 @@
 
   // ── Send ─────────────────────────────────────────────────────────────────
 
+  function handleAbort() {
+    isThinking = false;
+    vscode.postMessage({ type: 'abort' });
+  }
+
+  function startEdit(msg: UserMessage) {
+    editingMessageId = msg.id;
+    editingServerId = msg.serverId ?? null;
+    editOriginalText = msg.text;
+    inputText = msg.text;
+  }
+
+  function cancelEdit() {
+    editingMessageId = null;
+    editingServerId = null;
+    inputText = '';
+    editOriginalText = '';
+  }
+
   function handleSend() {
     const text = inputText.trim();
     if (!text) return;
-    messages = [...messages, { kind: 'user', text, id: nextId() }];
-    vscode.postMessage({ type: 'send', text });
+
+    if (editingMessageId !== null) {
+      // Trim messages: drop the edited bubble and everything after it
+      const idx = messages.findIndex(m => m.id === editingMessageId);
+      const trimmed = idx >= 0 ? messages.slice(0, idx) : messages;
+      messages = [...trimmed, { kind: 'user', text, id: nextId(), serverId: undefined }];
+      isThinking = true;
+      vscode.postMessage({ type: 'editMessage', text, editMessageId: editingServerId });
+      // Clear edit state
+      editingMessageId = null;
+      editingServerId = null;
+      editOriginalText = '';
+    } else {
+      messages = [...messages, { kind: 'user', text, id: nextId() }];
+      isThinking = true;
+      vscode.postMessage({ type: 'send', text });
+    }
+
     // Push to history; drop duplicate if same as last entry
     if (historyStack.length === 0 || historyStack[historyStack.length - 1] !== text) {
       historyStack = [...historyStack, text];
     }
-    historyCursor = historyStack.length; // reset to live position
+    historyCursor = historyStack.length;
     historySaved = '';
     inputText = '';
   }
@@ -247,7 +358,12 @@
         }
         case 'session.status': {
           const st = data.properties?.status as { type?: string; error?: unknown } | undefined;
-          if (st?.type === 'error') {
+          if (st?.type === 'busy') {
+            isThinking = true;
+          } else if (st?.type === 'idle') {
+            isThinking = false;
+          } else if (st?.type === 'error') {
+            isThinking = false;
             status = 'error';
             statusMessage = st.error ? String(st.error) : 'Session error';
           }
@@ -284,23 +400,32 @@
           break;
         }
         case 'session.idle': {
-          // assistant turn complete — nothing special needed for v1
+          isThinking = false;
           break;
         }
         case 'newSession': {
           messages = [];
-          status = 'connecting';
+          isThinking = false;
+          // Do NOT reset status here — the server is still running.
+          // The extension will immediately follow with a status message.
           statusMessage = '';
           // Reset prompt history for the new session
           historyStack = [];
           historyCursor = 0;
           historySaved = '';
           inputText = '';
+          // Clear edit state
+          editingMessageId = null;
+          editingServerId = null;
+          editOriginalText = '';
           // Clear any pending cards
           pendingQuestion = null;
           questionAnswers = [];
           customAnswers   = [];
           pendingPermission = null;
+          // Clear session panel
+          showSessionPanel = false;
+          currentSessionTitle = undefined;
           // Reset context selections (will be re-fetched when server confirms ready)
           currentAgent = undefined;
           currentModelId = undefined;
@@ -311,12 +436,17 @@
           break;
         }
         case 'sessionRestored': {
-          messages = Array.isArray(data.messages) ? data.messages : [];
+          messages = Array.isArray(data.messages) ? data.messages as Message[] : [];
+          isThinking = false;
           // Reset prompt history for the restored session
           historyStack = [];
           historyCursor = 0;
           historySaved = '';
           inputText = '';
+          // Clear edit state
+          editingMessageId = null;
+          editingServerId = null;
+          editOriginalText = '';
           status = 'ready';
           statusMessage = '';
           const cur = data.current ?? {};
@@ -327,16 +457,27 @@
             currentModelName = models.find(m => m.id === cur.modelId && m.providerID === cur.providerID)?.name ?? cur.modelId;
           }
           currentVariant = cur.variant;
+          // Close session panel after switching
+          showSessionPanel = false;
           scrollToBottom();
+          break;
+        }
+        case 'sessionList': {
+          sessionList = Array.isArray(data.sessions) ? data.sessions : [];
+          activeSessionId = typeof data.activeId === 'string' ? data.activeId : null;
+          // Keep current title in sync
+          const active = sessionList.find(s => s.id === activeSessionId);
+          if (active) currentSessionTitle = active.title;
+          sessionListLoading = false;
           break;
         }
         case 'context': {
           agents = Array.isArray(data.agents) ? data.agents : [];
           models = Array.isArray(data.models) ? data.models : [];
           const cur = data.current ?? {};
-          currentAgent = cur.agent;
-          currentModelId = cur.modelId;
-          currentProviderID = cur.providerID;
+          currentAgent = cur.agent ?? agents[0]?.name;
+          currentModelId = cur.modelId ?? models[0]?.id;
+          currentProviderID = cur.providerID ?? models[0]?.providerID;
           currentModelName = models.find(m => m.id === currentModelId && m.providerID === currentProviderID)?.name ?? currentModelId;
           currentVariant = cur.variant;
           contextError = undefined;
@@ -382,7 +523,7 @@
   </div>
 
   <!-- Context bar -->
-  {#if agents.length > 0 || models.length > 0 || contextError}
+  {#if agents.length > 0 || models.length > 0 || contextError || true}
     <div class="context-bar">
       {#if contextError}
         <span class="context-error">{contextError}
@@ -408,6 +549,61 @@
           </button>
         {/if}
       {/if}
+      <!-- Session picker button (always visible in context bar) -->
+      <button class="context-chip session-chip" on:click={toggleSessionPanel} title="Sessions" class:active={showSessionPanel}>
+        <span class="chip-icon">⊞</span>
+        <span class="chip-label">{currentSessionTitle ?? 'Sessions'}</span>
+      </button>
+      <!-- New session button -->
+      <button class="context-chip new-session-btn" on:click={() => vscode.postMessage({ type: 'newSession' })} title="New session">
+        <span class="chip-icon">+</span>
+      </button>
+    </div>
+  {/if}
+
+  <!-- Session panel overlay -->
+  {#if showSessionPanel}
+    <!-- svelte-ignore a11y-no-static-element-interactions -->
+    <div class="session-overlay" on:keydown={handleSessionPanelKeydown}>
+      <div class="session-panel">
+        <div class="session-panel-header">
+          <span class="session-panel-title">Sessions</span>
+          <button class="session-panel-close" on:click={() => { showSessionPanel = false; renamingId = null; }} title="Close">✕</button>
+        </div>
+        {#if sessionListLoading}
+          <div class="session-loading">Loading…</div>
+        {:else if sessionList.length === 0}
+          <div class="session-empty">No sessions for this workspace.</div>
+        {:else}
+          <ul class="session-list">
+            {#each sessionList as s (s.id)}
+              <li class="session-row" class:session-active={s.id === activeSessionId}>
+                {#if renamingId === s.id}
+                  <!-- Inline rename input -->
+                  <!-- svelte-ignore a11y-autofocus -->
+                  <input
+                    class="session-rename-input"
+                    autofocus
+                    bind:value={renameValue}
+                    on:keydown={(e) => { if (e.key === 'Enter') commitRename(s.id); if (e.key === 'Escape') renamingId = null; }}
+                    on:blur={() => commitRename(s.id)}
+                  />
+                {:else}
+                  <button class="session-title-btn" on:click={() => switchSession(s.id)} title="Switch to this session">
+                    <span class="session-title">{s.title || '(untitled)'}</span>
+                    <span class="session-time">{relativeTime(s.time?.updated ?? s.time?.created ?? 0)}</span>
+                  </button>
+                  <div class="session-actions">
+                    <button class="session-action-btn" title="Rename" on:click={() => startRename(s.id, s.title)}>✎</button>
+                    <button class="session-action-btn" title="Fork" on:click={() => forkSession(s.id)}>⑂</button>
+                    <button class="session-action-btn session-delete-btn" title="Delete" on:click={() => deleteSession(s.id)}>🗑</button>
+                  </div>
+                {/if}
+              </li>
+            {/each}
+          </ul>
+        {/if}
+      </div>
     </div>
   {/if}
 
@@ -416,7 +612,10 @@
     {#each messages as msg (msg.id)}
       {#if msg.kind === 'user'}
         <div class="message user-message">
-          <div class="bubble user-bubble">{msg.text}</div>
+          <div class="user-bubble-wrap" class:editing={msg.id === editingMessageId}>
+            <div class="bubble user-bubble">{msg.text}</div>
+            <button class="edit-btn" title="Edit message" on:click={() => startEdit(msg)}>✎</button>
+          </div>
         </div>
       {:else if msg.kind === 'assistant'}
         <div class="message assistant-message">
@@ -428,6 +627,15 @@
         </div>
       {/if}
     {/each}
+
+    {#if isThinking}
+      <div class="message assistant-message thinking-indicator">
+        <span class="thinking-dot"></span>
+        <span class="thinking-dot"></span>
+        <span class="thinking-dot"></span>
+        <button class="stop-button" on:click={handleAbort} title="Stop generation">Stop</button>
+      </div>
+    {/if}
   </div>
 
   <!-- Question card -->
@@ -495,6 +703,14 @@
     </div>
   {/if}
 
+  <!-- Edit mode banner -->
+  {#if editingMessageId !== null}
+    <div class="edit-banner">
+      <span>Editing message</span>
+      <button class="edit-cancel-btn" on:click={cancelEdit}>✕ Cancel</button>
+    </div>
+  {/if}
+
   <!-- Input area -->
   <div class="input-area">
     <textarea
@@ -530,6 +746,7 @@
     flex-direction: column;
     height: 100vh;
     overflow: hidden;
+    position: relative;
   }
 
   /* Status bar */
@@ -586,9 +803,109 @@
     white-space: pre-wrap;
   }
 
+  .user-bubble-wrap {
+    position: relative;
+    display: inline-flex;
+    align-items: flex-start;
+    max-width: 80%;
+  }
+
+  .user-bubble-wrap .edit-btn {
+    display: none;
+    position: absolute;
+    left: -26px;
+    top: 50%;
+    transform: translateY(-50%);
+    background: none;
+    border: none;
+    color: var(--vscode-foreground);
+    opacity: 0.5;
+    cursor: pointer;
+    font-size: 14px;
+    padding: 2px 4px;
+    line-height: 1;
+  }
+
+  .user-bubble-wrap:hover .edit-btn,
+  .user-bubble-wrap.editing .edit-btn {
+    display: block;
+  }
+
+  .user-bubble-wrap .edit-btn:hover { opacity: 1; }
+
+  .user-bubble-wrap.editing .user-bubble {
+    outline: 2px solid var(--vscode-focusBorder, #007acc);
+    outline-offset: 1px;
+  }
+
+  /* Edit mode banner */
+  .edit-banner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 4px 12px;
+    font-size: 11px;
+    background: var(--vscode-inputValidation-infoBackground, rgba(0,122,204,0.15));
+    border-top: 1px solid var(--vscode-inputValidation-infoBorder, #007acc);
+    color: var(--vscode-foreground);
+    flex-shrink: 0;
+  }
+
+  .edit-cancel-btn {
+    background: none;
+    border: none;
+    color: var(--vscode-foreground);
+    cursor: pointer;
+    font-size: 11px;
+    opacity: 0.7;
+    padding: 0 4px;
+  }
+  .edit-cancel-btn:hover { opacity: 1; }
+
   .assistant-message {
     align-items: flex-start;
     max-width: 100%;
+  }
+
+  .thinking-indicator {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 5px;
+    padding: 6px 2px;
+    min-height: 24px;
+  }
+
+  .thinking-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background-color: var(--vscode-foreground);
+    opacity: 0.4;
+    animation: thinking-bounce 1.2s ease-in-out infinite;
+  }
+
+  .thinking-dot:nth-child(1) { animation-delay: 0s; }
+  .thinking-dot:nth-child(2) { animation-delay: 0.2s; }
+  .thinking-dot:nth-child(3) { animation-delay: 0.4s; }
+
+  .stop-button {
+    margin-left: 8px;
+    padding: 2px 8px;
+    font-size: 11px;
+    border: 1px solid var(--vscode-button-secondaryBorder, var(--vscode-panel-border, #555));
+    background: var(--vscode-button-secondaryBackground, transparent);
+    color: var(--vscode-button-secondaryForeground, var(--vscode-foreground));
+    border-radius: 3px;
+    cursor: pointer;
+    opacity: 0.8;
+    line-height: 1.4;
+  }
+  .stop-button:hover { opacity: 1; }
+
+  @keyframes thinking-bounce {
+    0%, 60%, 100% { transform: translateY(0); opacity: 0.4; }
+    30%            { transform: translateY(-5px); opacity: 1; }
   }
 
   .assistant-text {
@@ -1012,5 +1329,158 @@
   .chat-input:disabled {
     opacity: 0.4;
     cursor: not-allowed;
+  }
+
+  /* ── Session chip ─────────────────────────────────────────────────────── */
+  .session-chip {
+    margin-left: auto; /* push to the right end of the context bar */
+  }
+  .session-chip.active {
+    background: var(--vscode-button-background);
+    color: var(--vscode-button-foreground);
+  }
+
+  .new-session-btn {
+    flex-shrink: 0;
+    font-weight: 700;
+    font-size: 14px;
+    padding: 1px 6px;
+  }
+
+  /* ── Session overlay ──────────────────────────────────────────────────── */
+  .session-overlay {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 100;
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    background: transparent;
+    pointer-events: none;
+  }
+
+  .session-panel {
+    pointer-events: all;
+    background: var(--vscode-sideBar-background, var(--vscode-editor-background));
+    border-bottom: 1px solid var(--vscode-panel-border, #444);
+    display: flex;
+    flex-direction: column;
+    max-height: 60vh;
+    overflow: hidden;
+  }
+
+  .session-panel-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 6px 10px;
+    border-bottom: 1px solid var(--vscode-panel-border, #444);
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--vscode-foreground);
+    opacity: 0.7;
+  }
+
+  .session-panel-close {
+    background: none;
+    border: none;
+    cursor: pointer;
+    color: var(--vscode-foreground);
+    opacity: 0.6;
+    font-size: 12px;
+    padding: 0 2px;
+  }
+  .session-panel-close:hover { opacity: 1; }
+
+  .session-loading,
+  .session-empty {
+    padding: 12px 10px;
+    font-size: 12px;
+    opacity: 0.6;
+    text-align: center;
+  }
+
+  .session-list {
+    list-style: none;
+    margin: 0;
+    padding: 4px 0;
+    overflow-y: auto;
+    flex: 1;
+  }
+
+  .session-row {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 6px;
+    border-radius: 4px;
+    margin: 1px 4px;
+  }
+  .session-row:hover { background: var(--vscode-list-hoverBackground); }
+  .session-row.session-active { background: var(--vscode-list-activeSelectionBackground); color: var(--vscode-list-activeSelectionForeground); }
+
+  .session-title-btn {
+    flex: 1;
+    background: none;
+    border: none;
+    cursor: pointer;
+    text-align: left;
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    padding: 4px 2px;
+    color: inherit;
+    min-width: 0;
+  }
+
+  .session-title {
+    font-size: 12px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .session-time {
+    font-size: 10px;
+    opacity: 0.5;
+  }
+
+  .session-actions {
+    display: flex;
+    gap: 2px;
+    opacity: 0;
+    transition: opacity 0.1s;
+  }
+  .session-row:hover .session-actions,
+  .session-row.session-active .session-actions { opacity: 1; }
+
+  .session-action-btn {
+    background: none;
+    border: none;
+    cursor: pointer;
+    font-size: 12px;
+    padding: 2px 4px;
+    border-radius: 3px;
+    color: var(--vscode-foreground);
+    opacity: 0.6;
+  }
+  .session-action-btn:hover { opacity: 1; background: var(--vscode-toolbar-hoverBackground); }
+  .session-delete-btn:hover { color: var(--vscode-errorForeground); }
+
+  .session-rename-input {
+    flex: 1;
+    background: var(--vscode-input-background);
+    color: var(--vscode-input-foreground);
+    border: 1px solid var(--vscode-focusBorder);
+    border-radius: 3px;
+    padding: 3px 6px;
+    font-size: 12px;
+    font-family: inherit;
+    outline: none;
   }
 </style>
