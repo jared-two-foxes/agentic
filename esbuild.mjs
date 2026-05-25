@@ -16,9 +16,25 @@ const options = {
 };
 
 if (watch) {
-  const ctx = await esbuild.context(options);
+  const ctx = await esbuild.context({
+    ...options,
+    plugins: [
+      {
+        name: "rebuild-notify",
+        setup(build) {
+          build.onEnd((result) => {
+            if (result.errors.length > 0) {
+              console.error(`[esbuild] build failed with ${result.errors.length} error(s)`);
+            } else {
+              console.log("[esbuild] build finished");
+            }
+          });
+        },
+      },
+    ],
+  });
+  console.log("[esbuild] watching for changes...");
   await ctx.watch();
-  console.log("Watching for changes...");
 } else {
   await esbuild.build(options);
   console.log("Extension built successfully.");

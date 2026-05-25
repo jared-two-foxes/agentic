@@ -263,6 +263,196 @@ Allow the user to edit a previous user message and resubmit from that point, dis
 
 ---
 
+## Task 12 — Install and Configure Recallium Server
+
+Recallium is a self-hosted persistent memory server for AI coding assistants. It stores decisions, patterns, API facts, failures, and completed work — and makes them available across sessions via MCP tools (`store_memory`, `search_memories`, `session_recap`, etc.).
+
+This task is **manual / infrastructure** — no code changes to the extension.
+
+### Step 12.1 — Clone and start the Recallium Docker container
+- Clone the repo: `git clone https://github.com/recallium-ai/recallium.git`
+- Navigate to `recallium/install/`
+- Run `start-recallium.bat` (Windows) — this pulls the Docker image and starts the server on `http://localhost:8001`
+- Verify by visiting `http://localhost:8001` in a browser
+- [ ] Done
+
+### Step 12.2 — Create a per-repo project in the Recallium UI
+- Open `http://localhost:8001` → Projects → New Project
+- Name it **`opencode-vscode`** — all repo-specific memories will be scoped here
+- Global/cross-repo memories (patterns, rules that apply everywhere) go in the default project
+- [ ] Done
+
+### Step 12.3 — Verify MCP endpoint is reachable
+- Confirm `http://localhost:8001/mcp` responds (can curl or browser-check)
+- This is the URL the `recallium` npm package will point to
+- [ ] Done
+
+**Acceptance:** `http://localhost:8001` loads the Recallium UI, the `opencode-vscode` project exists, and `/mcp` is reachable.
+
+---
+
+## Task 13 — Recallium MCP + Agent Integration
+
+Wire Recallium into opencode's MCP config and update agent prompts so the AI automatically loads and stores context across sessions.
+
+**Memory categories in scope:**
+- Architecture & API facts (endpoint details, structural decisions, naming conventions)
+- Failures & rejected approaches (what was tried and why it was dropped)
+- Completed features (what shipped, acceptance criteria met)
+- Agent / workflow rules (conventions all agents must follow in this repo)
+
+**Memory scoping:** per-repo memories tagged `opencode-vscode`; cross-repo patterns additionally tagged `global`.
+
+**Files affected:** `~/.config/opencode/opencode.json`, `~/.config/opencode/agents/orchestrator.md`, `~/.config/opencode/agents/linear-orchestrator.md`, `~/.config/opencode/agents/summarizer.md`, `~/.config/opencode/agents/planner.md`
+
+---
+
+### Step 13.1 — Add `recallium` to opencode MCP config
+
+**File:** `~/.config/opencode/opencode.json`
+
+Add to the `mcp` block:
+
+```json
+"recallium": {
+  "type": "local",
+  "enabled": true,
+  "command": ["npx", "-y", "recallium"],
+  "environment": {
+    "RECALLIUM_SERVER_URL": "http://localhost:8001/mcp"
+  }
+}
+```
+
+This makes `store_memory`, `search_memories`, `session_recap`, `projects`, `tasks`, and `get_rules` available to all agents in every session.
+
+- [x] Implement and verify opencode picks up the MCP server (restart opencode after editing)
+
+---
+
+### Step 13.2 — Update `orchestrator.md` — session-start context loading
+
+**File:** `~/.config/opencode/agents/orchestrator.md`
+
+Add a **Recallium Context Loading** section near the top (after Toolchain Detection, before planning begins):
+
+```markdown
+## Recallium Context Loading
+
+At the start of every session, before planning or implementation:
+1. Call `search_memories` with the current repo name (`opencode-vscode`) and the task topic
+2. Call `session_recap` to surface what was recently worked on in this repo
+3. Read any returned architecture facts, API patterns, failure notes, or rules and incorporate them into your plan
+
+Do not skip this step even if the task seems straightforward — past decisions and known failures are often highly relevant.
+```
+
+- [x] Implement
+
+---
+
+### Step 13.3 — Update `orchestrator.md` — during-work memory storage
+
+**File:** `~/.config/opencode/agents/orchestrator.md`
+
+Add a **Recallium Memory Storage** section (after the planning/implementation workflow, before the summary):
+
+```markdown
+## Recallium Memory Storage
+
+Store a memory via `store_memory` when any of the following occur:
+
+| Trigger | `type` | Required fields |
+|---|---|---|
+| A non-obvious architectural decision is made | `decision` | rationale, alternatives considered |
+| An API endpoint or schema detail is confirmed | `code-snippet` | tag: `api-fact`, exact path/method/body |
+| A reusable pattern is established | `pattern` | file paths, usage guidance |
+| An approach is tried and rejected | `failure` | what was tried, why it failed |
+| A backlog task or feature is completed | `completed-feature` | acceptance criteria met, files changed |
+| A repo-wide convention is established | `rule` | when it applies, why |
+
+Always include:
+- `project`: `opencode-vscode` for repo-specific; add tag `global` for cross-repo patterns
+- File paths affected
+- Sufficient rationale that a future session can act on it without context
+```
+
+- [x] Implement
+
+---
+
+### Step 13.4 — Update `linear-orchestrator.md` — add same Recallium sections
+
+**File:** `~/.config/opencode/agents/linear-orchestrator.md`
+
+Apply identical **Recallium Context Loading** and **Recallium Memory Storage** sections as Steps 13.2 and 13.3.
+
+The Linear orchestrator runs the same TDD pipeline but with issue-tracker sync — it needs the same memory behaviour so Linear-driven work is also persisted.
+
+- [x] Implement
+
+---
+
+### Step 13.5 — Update `summarizer.md` — session-end recap storage
+
+**File:** `~/.config/opencode/agents/summarizer.md`
+
+Add a **Recallium Session Summary** section at the end of the agent instructions:
+
+```markdown
+## Recallium Session Summary
+
+After producing the execution summary, call `store_memory` with:
+- `type`: `session-recap`
+- `content`: a concise summary of what was completed this session, what was attempted but not finished, and what the recommended next step is
+- `project`: `opencode-vscode`
+- `tags`: `opencode-vscode`, `session-recap`
+- Include any key decisions or API facts discovered during the session that haven't already been stored
+
+This ensures the next session can orient itself without re-reading the full conversation history.
+```
+
+- [x] Implement
+
+---
+
+### Step 13.6 — Update `planner.md` — context loading at plan time
+
+**File:** `~/.config/opencode/agents/planner.md`
+
+Add a **Recallium Context** section at the top of the agent instructions (before acceptance criteria and plan generation):
+
+```markdown
+## Recallium Context
+
+Before writing acceptance criteria or an implementation plan:
+1. Call `search_memories` for the task topic in the `opencode-vscode` project
+2. Check for any stored failures or rejected approaches that would affect the plan
+3. Check for stored architecture decisions or API facts relevant to the task
+4. Incorporate findings — do not re-plan work that has already been tried and failed; do not contradict established decisions without explicit justification
+```
+
+- [x] Implement
+
+---
+
+### Step 13.7 — Smoke test end-to-end
+
+Run a real session and verify the memory flow works:
+
+1. Start a new opencode session in this repo
+2. Ask the orchestrator to work on something small (e.g. a minor UI tweak)
+3. Confirm `search_memories` is called at session start
+4. Confirm at least one `store_memory` call is made during the session
+5. Confirm the summarizer calls `store_memory` with type `session-recap` at the end
+6. Open `http://localhost:8001` and verify the memories appear in the `opencode-vscode` project
+
+- [ ] Done
+
+**Acceptance:** Memories from the session appear in the Recallium UI under the `opencode-vscode` project; a new session in the same repo surfaces them via `search_memories` at the start.
+
+---
+
 ## Future / Unstarted
 
 - Diff viewer / approve-reject for file edits
