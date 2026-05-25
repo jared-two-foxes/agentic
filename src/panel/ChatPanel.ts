@@ -6,6 +6,13 @@ import { OpenCodeClient } from "../client/api";
 import type { Agent, Model, CurrentSelection, SessionMessageItem } from "../client/api";
 import { ServerManager, ServerStatus } from "../server";
 
+/** Shape persisted to workspaceState so chips can be shown before the server is ready. */
+interface CachedContext {
+  agents: Array<{ name: string; description?: string; model?: { modelID: string; providerID: string } }>;
+  models: Array<{ id: string; providerID: string; name: string; hasVariants: boolean; variants: string[] }>;
+  current: CurrentSelection;
+}
+
 export class ChatPanel implements vscode.WebviewViewProvider {
   public static readonly viewId = "opencode.chatView";
 
@@ -20,6 +27,7 @@ export class ChatPanel implements vscode.WebviewViewProvider {
 
   private static readonly SESSION_KEY = "opencode.sessionId";
   private static readonly AGENT_KEY   = "opencode.agentSelection";
+  private static readonly CONTEXT_KEY = "opencode.context";
 
   /** Returns a workspaceState key scoped to the current workspace root, preventing cross-project bleed. */
   private _sessionKey(): string {
@@ -35,6 +43,14 @@ export class ChatPanel implements vscode.WebviewViewProvider {
     return root
       ? `${ChatPanel.AGENT_KEY}:${this._normPath(root)}`
       : ChatPanel.AGENT_KEY;
+  }
+
+  /** Returns a workspaceState key for persisting the last-known context payload, scoped per workspace. */
+  private _contextKey(): string {
+    const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    return root
+      ? `${ChatPanel.CONTEXT_KEY}:${this._normPath(root)}`
+      : ChatPanel.CONTEXT_KEY;
   }
 
   /** Persist the current agent selection to workspaceState. */
@@ -142,8 +158,7 @@ export class ChatPanel implements vscode.WebviewViewProvider {
         this._selection.providerID = current.providerID;
       }
 
-      webview.postMessage({
-        type: "context",
+      const payload: CachedContext = {
         agents: this._agents.map(a => ({ name: a.name, description: a.description, model: a.model })),
         models: models.map(m => ({
           id: m.id,
@@ -153,9 +168,11 @@ export class ChatPanel implements vscode.WebviewViewProvider {
           variants: m.variants ? Object.keys(m.variants) : [],
         })),
         current: { ...this._selection },
-      });
+      };
+      webview.postMessage({ type: "context", ...payload });
+      // Persist so the next panel open can show chips immediately (before server is ready).
+      this._context.workspaceState.update(this._contextKey(), payload);
 
-      // Attempt to restore the previous session (only when no session is active yet)
       if (attemptRestore && !this._sessionPromise) {
         await this._tryRestoreSession(webview);
       }
@@ -300,6 +317,12 @@ export class ChatPanel implements vscode.WebviewViewProvider {
 
     // Post current server status immediately
     webviewView.webview.postMessage({ type: "status", ...this._lastStatus });
+
+    // Post any previously cached context immediately so chips render without waiting for the server.
+    const stale = this._context.workspaceState.get<CachedContext>(this._contextKey());
+    if (stale) {
+      webviewView.webview.postMessage({ type: "context", ...stale });
+    }
 
     // Read settings fresh each time the view is resolved
     const config = vscode.workspace.getConfiguration("opencode");

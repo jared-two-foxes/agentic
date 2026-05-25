@@ -89,7 +89,7 @@ export class ServerManager {
   private _pollReady(port: number, timeoutMs: number): Promise<void> {
     return new Promise((resolve, reject) => {
       const deadline = Date.now() + timeoutMs;
-      let delay = 1000;
+      let delay = 250;
 
       const attempt = () => {
         http.get(`http://localhost:${port}/`, (res) => {
@@ -105,7 +105,7 @@ export class ServerManager {
           const remaining = deadline - now;
           const wait = Math.min(delay, remaining);
           setTimeout(attempt, wait);
-          delay = Math.min(delay * 2, 8000);
+          delay = Math.min(delay * 2, 4000);
         });
       };
 
