@@ -61,6 +61,7 @@
   let currentVariant: string | undefined;
   let currentProviderID: string | undefined;
   let contextError: string | undefined;
+  let isContextLoaded = false;
   $: currentModelVariants = models.find(m => m.id === currentModelId && m.providerID === currentProviderID)?.variants ?? [];
   $: showVariantChip = currentModelVariants.length > 0;
 
@@ -472,6 +473,7 @@
           break;
         }
         case 'context': {
+          isContextLoaded = true;
           agents = Array.isArray(data.agents) ? data.agents : [];
           models = Array.isArray(data.models) ? data.models : [];
           const cur = data.current ?? {};
@@ -496,6 +498,7 @@
         }
         case 'contextError': {
           contextError = typeof data.message === 'string' ? data.message : 'Failed to load context';
+          isContextLoaded = true;
           break;
         }
         default:
@@ -516,6 +519,7 @@
 </script>
 
 <div class="chat-container">
+  {#if isContextLoaded}
   <!-- Status bar -->
   <div class="status-bar" class:status-connecting={status === 'connecting'} class:status-ready={status === 'ready'} class:status-error={status === 'error'}>
     <span class="status-dot"></span>
@@ -727,6 +731,19 @@
       disabled={!canSend}
     >Send</button>
   </div>
+  {:else if status === 'error'}
+    <div class="loading-screen">
+      <span class="loading-error-icon">⚠</span>
+      <p class="loading-text">Failed to start server</p>
+      {#if statusMessage}<p class="loading-subtext">{statusMessage}</p>{/if}
+      <button class="loading-retry-btn" on:click={() => vscode.postMessage({ type: 'getStatus' })}>Retry</button>
+    </div>
+  {:else}
+    <div class="loading-screen">
+      <div class="spinner"></div>
+      <p class="loading-text">Starting opencode…</p>
+    </div>
+  {/if}
 </div>
 
 <style>
@@ -1482,5 +1499,64 @@
     font-size: 12px;
     font-family: inherit;
     outline: none;
+  }
+
+  /* ── Loading / error screen ───────────────────────────────────────────── */
+  .loading-screen {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    gap: 12px;
+  }
+
+  .spinner {
+    width: 28px;
+    height: 28px;
+    border: 2px solid var(--vscode-panel-border, #444);
+    border-top-color: var(--vscode-foreground);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+    flex-shrink: 0;
+  }
+
+  @keyframes spin {
+    to { transform: rotate(360deg); }
+  }
+
+  .loading-text {
+    font-size: 12px;
+    color: var(--vscode-descriptionForeground, var(--vscode-foreground));
+    margin: 0;
+    opacity: 0.7;
+  }
+
+  .loading-subtext {
+    font-size: 11px;
+    color: var(--vscode-descriptionForeground, var(--vscode-foreground));
+    margin: 0;
+    opacity: 0.5;
+    text-align: center;
+    max-width: 220px;
+  }
+
+  .loading-error-icon {
+    font-size: 24px;
+    color: var(--vscode-charts-red, #e06c75);
+  }
+
+  .loading-retry-btn {
+    padding: 4px 14px;
+    border-radius: 4px;
+    border: 1px solid var(--vscode-panel-border, #555);
+    background: var(--vscode-button-secondaryBackground, transparent);
+    color: var(--vscode-button-secondaryForeground, var(--vscode-foreground));
+    font-size: 12px;
+    cursor: pointer;
+  }
+
+  .loading-retry-btn:hover {
+    border-color: var(--vscode-focusBorder);
   }
 </style>
