@@ -712,8 +712,12 @@
             {:else if part.type === 'subtask'}
               <div class="subtask-card">
                 <div class="subtask-header">
-                  <span class="subtask-icon">⟳</span>
-                  <span class="subtask-label">{part.agentName ?? 'Subagent'}</span>
+                  <span class="subtask-icon" class:subtask-icon--spinning={isThinking}>↻</span>
+                  <span class="subtask-prefix">Sub-agent</span>
+                  {#if part.agentName}
+                    <span class="subtask-sep">·</span>
+                    <span class="subtask-label">{part.agentName}</span>
+                  {/if}
                 </div>
                 <div class="subtask-body">
                   {#each part.parts as sp (sp.partID)}
@@ -1698,18 +1702,44 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    padding: 4px 10px;
+    padding: 5px 10px;
     border-bottom: 1px solid var(--vscode-panel-border, #444);
+    background: color-mix(in srgb, var(--vscode-charts-blue, #4fc1ff) 10%, transparent);
     font-size: 11px;
     font-weight: 600;
-    text-transform: uppercase;
     letter-spacing: 0.04em;
-    opacity: 0.7;
   }
 
   .subtask-icon {
-    font-size: 11px;
-    opacity: 0.8;
+    font-size: 14px;
+    line-height: 1;
+    display: inline-block;
+    flex-shrink: 0;
+    color: var(--vscode-charts-blue, #4fc1ff);
+  }
+
+  .subtask-icon--spinning {
+    animation: subtask-spin 1.4s linear infinite;
+  }
+
+  @keyframes subtask-spin {
+    to { transform: rotate(360deg); }
+  }
+
+  .subtask-prefix {
+    color: var(--vscode-charts-blue, #4fc1ff);
+    text-transform: uppercase;
+  }
+
+  .subtask-sep {
+    opacity: 0.35;
+  }
+
+  .subtask-label {
+    opacity: 0.65;
+    font-weight: 400;
+    text-transform: none;
+    letter-spacing: 0;
   }
 
   .subtask-body {
