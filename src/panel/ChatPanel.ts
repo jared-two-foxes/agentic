@@ -27,6 +27,7 @@ export class ChatPanel implements vscode.WebviewViewProvider {
 
   private static readonly SESSION_KEY = "opencode.sessionId";
   private static readonly AGENT_KEY   = "opencode.agentSelection";
+  private static readonly MODEL_KEY   = "opencode.modelSelection";
   private static readonly CONTEXT_KEY = "opencode.context";
 
   /** Returns a workspaceState key scoped to the current workspace root, preventing cross-project bleed. */
@@ -53,6 +54,14 @@ export class ChatPanel implements vscode.WebviewViewProvider {
       : ChatPanel.CONTEXT_KEY;
   }
 
+  /** Returns a workspaceState key for persisting model/variant selection, scoped per workspace. */
+  private _modelKey(): string {
+    const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    return root
+      ? `${ChatPanel.MODEL_KEY}:${this._normPath(root)}`
+      : ChatPanel.MODEL_KEY;
+  }
+
   /** Persist the current agent selection to workspaceState. */
   private _saveAgentSelection(): void {
     this._context.workspaceState.update(this._agentKey(), this._selection.agent ?? null);
@@ -63,6 +72,34 @@ export class ChatPanel implements vscode.WebviewViewProvider {
     const saved = this._context.workspaceState.get<string>(this._agentKey());
     if (saved && !this._selection.agent) {
       this._selection.agent = saved;
+    }
+  }
+
+  /** Persist the current model/variant selection to workspaceState. */
+  private _saveModelSelection(): void {
+    this._context.workspaceState.update(this._modelKey(), {
+      modelId: this._selection.modelId ?? null,
+      providerID: this._selection.providerID ?? null,
+      variant: this._selection.variant ?? null,
+    });
+  }
+
+  /** Restore a previously saved model/variant selection into _selection (only if no model is already set). */
+  private _restoreModelSelection(): void {
+    const saved = this._context.workspaceState.get<{ modelId?: string; providerID?: string; variant?: string }>(this._modelKey());
+    if (saved && !this._selection.modelId) {
+      if (saved.modelId) { this._selection.modelId = saved.modelId; }
+      if (saved.providerID) { this._selection.providerID = saved.providerID; }
+      if (saved.variant) { this._selection.variant = saved.variant; }
+    }
+  }
+
+  /** Update only the `current` field of the stored CachedContext to reflect the latest _selection.
+   *  Called after mid-session model/variant changes so the stale chips on the next open are correct. */
+  private _updateCachedContextSelection(): void {
+    const cached = this._context.workspaceState.get<CachedContext>(this._contextKey());
+    if (cached) {
+      this._context.workspaceState.update(this._contextKey(), { ...cached, current: { ...this._selection } });
     }
   }
 
@@ -145,6 +182,8 @@ export class ChatPanel implements vscode.WebviewViewProvider {
       if (!this._selection.agent) this._selection.agent = current.agent;
       // Restore persisted agent selection if nothing is set from config
       this._restoreAgentSelection();
+      // Restore persisted model/variant selection (takes priority over agent default and config default)
+      this._restoreModelSelection();
       // If the (restored) agent has a model preference, apply it when no model is explicitly set
       if (this._selection.agent && !this._selection.modelId) {
         const agentDef = this._agents.find(a => a.name === this._selection.agent);
@@ -435,6 +474,8 @@ export class ChatPanel implements vscode.WebviewViewProvider {
           this._selection.modelId = picked._model.id;
           this._selection.providerID = picked._model.providerID;
           this._selection.variant = undefined;
+          this._saveModelSelection();
+          this._updateCachedContextSelection();
           // Reset session so next send uses the new model
           this._unsubscribe?.();
           this._unsubscribe = undefined;
@@ -462,6 +503,8 @@ export class ChatPanel implements vscode.WebviewViewProvider {
         });
         if (picked && picked !== this._selection.variant) {
           this._selection.variant = picked;
+          this._saveModelSelection();
+          this._updateCachedContextSelection();
           // Reset session so next send uses the new variant
           this._unsubscribe?.();
           this._unsubscribe = undefined;
