@@ -15,7 +15,8 @@
   type AssistantPart = TextPart;
   type UserMessage = { kind: 'user'; id: string; serverId?: string; text: string };
   type AssistantMessage = { kind: 'assistant'; id: string; parts: AssistantPart[] };
-  type Message = UserMessage | AssistantMessage;
+  type ErrorMessage = { kind: 'error'; id: string; text: string };
+  type Message = UserMessage | AssistantMessage | ErrorMessage;
 
   type QuestionOption   = { label: string; description: string };
   type QuestionInfo     = { question: string; header: string; options: QuestionOption[]; multiple?: boolean; custom?: boolean };
@@ -347,6 +348,9 @@
             status = val;
           }
           statusMessage = typeof data.message === 'string' ? data.message : '';
+          if (val === 'error' && isContextLoaded) {
+            messages = [...messages, { kind: 'error', id: nextId(), text: statusMessage || 'An error occurred' }];
+          }
           scrollToBottom();
           break;
         }
@@ -366,7 +370,10 @@
           } else if (st?.type === 'error') {
             isThinking = false;
             status = 'error';
-            statusMessage = st.error ? String(st.error) : 'Session error';
+            const errText = st.error ? String(st.error) : 'Session error';
+            statusMessage = errText;
+            messages = [...messages, { kind: 'error', id: nextId(), text: errText }];
+            scrollToBottom();
           }
           break;
         }
@@ -520,12 +527,6 @@
 
 <div class="chat-container">
   {#if isContextLoaded}
-  <!-- Status bar -->
-  <div class="status-bar" class:status-connecting={status === 'connecting'} class:status-ready={status === 'ready'} class:status-error={status === 'error'}>
-    <span class="status-dot"></span>
-    <span class="status-text">{status}{statusMessage ? ': ' + statusMessage : ''}</span>
-  </div>
-
   <!-- Context bar -->
   {#if agents.length > 0 || models.length > 0 || contextError || true}
     <div class="context-bar">
@@ -628,6 +629,10 @@
               <div class="assistant-text">{@html renderMarkdown(part.text)}</div>
             {/if}
           {/each}
+        </div>
+      {:else if msg.kind === 'error'}
+        <div class="message error-message">
+          <span class="error-bubble">{msg.text}</span>
         </div>
       {/if}
     {/each}
@@ -766,31 +771,6 @@
     position: relative;
   }
 
-  /* Status bar */
-  .status-bar {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    padding: 4px 12px;
-    font-size: 11px;
-    border-bottom: 1px solid var(--vscode-panel-border, #444);
-    background: var(--vscode-statusBar-background, var(--vscode-editor-background));
-    color: var(--vscode-statusBar-foreground, var(--vscode-foreground));
-    flex-shrink: 0;
-  }
-
-  .status-dot {
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    background: currentColor;
-    opacity: 0.7;
-  }
-
-  .status-connecting { color: var(--vscode-charts-yellow, #e5c07b); }
-  .status-ready { color: var(--vscode-charts-green, #98c379); }
-  .status-error { color: var(--vscode-charts-red, #e06c75); }
-
   /* Message list */
   .message-list {
     flex: 1;
@@ -882,6 +862,18 @@
   .assistant-message {
     align-items: flex-start;
     max-width: 100%;
+  }
+
+  .error-message {
+    align-items: flex-start;
+  }
+
+  .error-bubble {
+    font-size: 12px;
+    color: var(--vscode-charts-red, #e06c75);
+    opacity: 0.85;
+    font-style: italic;
+    padding: 2px 0;
   }
 
   .thinking-indicator {
