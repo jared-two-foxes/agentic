@@ -23,6 +23,10 @@ export function activate(context: vscode.ExtensionContext): void {
       provider.resetSession();
       vscode.commands.executeCommand("opencode.chatView.focus");
     }),
+    vscode.commands.registerCommand("opencode.maximizeChat", () => {
+      provider.maximize();
+    }),
+    vscode.commands.registerCommand("opencode.minimizeChat", () => provider.minimize()),
     vscode.workspace.onDidChangeWorkspaceFolders(() => {
       // Reset the chat session immediately so the UI reflects the new folder,
       // then restart the server so it runs in the new workspace directory.

@@ -33,6 +33,18 @@
         "title": "opencode: New Session",
         "category": "opencode",
         "icon": "$(add)"
+      },
+      {
+        "command": "opencode.maximizeChat",
+        "title": "opencode: Open in Editor",
+        "category": "opencode",
+        "icon": "$(screen-full)"
+      },
+      {
+        "command": "opencode.minimizeChat",
+        "title": "Minimize Chat",
+        "icon": "$(screen-normal)",
+        "category": "opencode"
       }
     ],
     "menus": {
@@ -40,6 +52,18 @@
         {
           "command": "opencode.newSession",
           "when": "view == opencode.chatView",
+          "group": "navigation"
+        },
+        {
+          "command": "opencode.maximizeChat",
+          "when": "view == opencode.chatView",
+          "group": "navigation"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "opencode.minimizeChat",
+          "when": "activeWebviewPanelId == 'opencode.chatEditor'",
           "group": "navigation"
         }
       ]

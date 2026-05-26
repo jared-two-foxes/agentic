@@ -15,6 +15,7 @@ interface CachedContext {
 
 export class ChatPanel implements vscode.WebviewViewProvider {
   public static readonly viewId = "opencode.chatView";
+  public static readonly maximizeCommand = "opencode.maximizeChat";
 
   private _unsubscribe: (() => void) | undefined;
   private _sessionPromise: Promise<string> | undefined;
@@ -24,6 +25,8 @@ export class ChatPanel implements vscode.WebviewViewProvider {
   private _models: Model[] = [];
   private _selection: CurrentSelection = {};
   private _api: OpenCodeClient | undefined;
+  private _editorPanel: vscode.WebviewPanel | undefined;
+  private _editorDisposables: vscode.Disposable[] = [];
 
   private static readonly SESSION_KEY = "opencode.sessionId";
   private static readonly AGENT_KEY   = "opencode.agentSelection";
@@ -113,9 +116,7 @@ export class ChatPanel implements vscode.WebviewViewProvider {
   /** Called by extension.ts when server status changes */
   notifyStatus(status: ServerStatus): void {
     this._lastStatus = status;
-    if (this._currentView) {
-      this._currentView.webview.postMessage({ type: "status", ...status });
-    }
+    this._broadcast({ type: "status", ...status });
     if (status.value === "ready" && this._currentView) {
       this._fetchAndPostContext(this._currentView.webview);
     }
@@ -139,7 +140,7 @@ export class ChatPanel implements vscode.WebviewViewProvider {
 
   /** Fetch the session list for the current workspace and post it to the webview. */
   private async _pushSessionList(activeId: string | null): Promise<void> {
-    if (!this._api || !this._currentView) return;
+    if (!this._api) return;
     try {
       const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
       const sessions = await this._api.listSessions(workspaceRoot);
@@ -151,9 +152,9 @@ export class ChatPanel implements vscode.WebviewViewProvider {
         if (active) result = [active, ...result];
       }
       result.sort((a, b) => (b.time?.updated ?? 0) - (a.time?.updated ?? 0));
-      this._currentView.webview.postMessage({ type: "sessionList", sessions: result, activeId });
+      this._broadcast({ type: "sessionList", sessions: result, activeId });
     } catch {
-      this._currentView.webview.postMessage({ type: "sessionList", sessions: [], activeId });
+      this._broadcast({ type: "sessionList", sessions: [], activeId });
     }
   }
 
@@ -321,14 +322,410 @@ export class ChatPanel implements vscode.WebviewViewProvider {
     this._sessionPromise = undefined;
     this._selection = {};
     this._context.workspaceState.update(this._sessionKey(), undefined);
-    if (this._currentView) {
-      this._currentView.webview.postMessage({ type: "newSession" });
-      // Re-post current status immediately so the webview doesn't stay stuck
-      // on "connecting" — the server is already up, notifyStatus won't fire again.
-      this._currentView.webview.postMessage({ type: "status", ...this._lastStatus });
-      if (this._lastStatus.value === "ready") {
-        this._fetchAndPostContext(this._currentView.webview, false);
+    this._broadcast({ type: "newSession" });
+    // Re-post current status immediately so the webview doesn't stay stuck
+    // on "connecting" — the server is already up, notifyStatus won't fire again.
+    this._broadcast({ type: "status", ...this._lastStatus });
+    if (this._lastStatus.value === "ready" && this._currentView) {
+      this._fetchAndPostContext(this._currentView.webview, false);
+    }
+  }
+
+  /**
+   * Open the chat in an editor-tab WebviewPanel beside the active editor.
+   * If a panel is already open, reveal it. Closes the sidebar automatically.
+   * NOTE: workbench.action.closeSidebar hides the entire sidebar, not just
+   * the opencode view.
+   */
+  public maximize(): void {
+    // If already open, just reveal it.
+    if (this._editorPanel) {
+      this._editorPanel.reveal(vscode.ViewColumn.Active);
+      return;
+    }
+
+    // Dispose any stale disposables from a previous panel.
+    this._editorDisposables.forEach(d => d.dispose());
+    this._editorDisposables = [];
+
+    this._editorPanel = vscode.window.createWebviewPanel(
+      "opencode.chatEditor",
+      "opencode",
+      vscode.ViewColumn.Active,
+      {
+        enableScripts: true,
+        retainContextWhenHidden: true,
+        localResourceRoots: [vscode.Uri.joinPath(this.extensionUri, "dist", "webview")],
       }
+    );
+
+    // Capture panel reference to avoid unsafe closure over mutable field.
+    const panel = this._editorPanel;
+    panel.webview.html = this._getHtml(panel.webview);
+
+    // Wire incoming messages from the editor panel through the shared handler.
+    this._editorDisposables.push(
+      panel.webview.onDidReceiveMessage(
+        (msg) => this._handleMessage(panel.webview, msg)
+      )
+    );
+
+    // When the editor panel is closed, restore the sidebar.
+    this._editorDisposables.push(
+      panel.onDidDispose(() => {
+        this._editorDisposables.forEach(d => d.dispose());
+        this._editorDisposables = [];
+        this._editorPanel = undefined;
+        vscode.commands.executeCommand("opencode.chatView.focus");
+      })
+    );
+
+    // Bootstrap: send current server status immediately.
+    panel.webview.postMessage({ type: "status", ...this._lastStatus });
+
+    // Bootstrap: send any cached context (agents/models/current selection).
+    const stale = this._context.workspaceState.get<CachedContext>(this._contextKey());
+    if (stale) {
+      panel.webview.postMessage({ type: "context", ...stale });
+    }
+
+    // Bootstrap: restore session history if a session is already active.
+    if (this._sessionPromise && this._api) {
+      this._sessionPromise
+        .then(async (sessionId) => {
+          const history = await this._api!.getSessionMessages(sessionId, 50);
+          const messages = this._mapToWebviewMessages(history);
+          panel.webview.postMessage({
+            type: "sessionRestored",
+            messages,
+            current: { ...this._selection },
+          });
+        })
+        .catch(() => { /* non-fatal — panel will just start empty */ });
+    }
+
+    // Ensure _api is initialized even if the sidebar was never resolved.
+    if (!this._api) {
+      const config = vscode.workspace.getConfiguration("opencode");
+      const editorPort: number = config.get("port") ?? 4096;
+      this.secrets.get("opencode.password").then((pw) => {
+        this._api = new OpenCodeClient(`http://localhost:${editorPort}`, pw ?? "");
+        if (this._lastStatus.value === "ready" && !this._sessionPromise && panel.webview) {
+          this._fetchAndPostContext(panel.webview);
+        }
+      });
+    }
+
+    // Auto-hide the sidebar (closes the entire sidebar panel).
+    vscode.commands.executeCommand("workbench.action.closeSidebar");
+  }
+
+  /**
+   * Close the editor-tab panel and restore the sidebar.
+   * Called by the opencode.minimizeChat command.
+   */
+  public minimize(): void {
+    this._editorPanel?.dispose();
+  }
+
+  /** Post a message to all active webviews (sidebar and editor panel). */
+  private _broadcast(message: unknown): void {
+    this._currentView?.webview.postMessage(message);
+    this._editorPanel?.webview.postMessage(message);
+  }
+
+  private async _handleMessage(
+    webview: vscode.Webview,
+    msg: { type: string; text?: string; requestID?: string; answers?: unknown; reply?: string; message?: string; sessionId?: string; title?: string; editMessageId?: string }
+  ): Promise<void> {
+    const port: number = vscode.workspace.getConfiguration("opencode").get("port") ?? 4096;
+
+    if (msg.type === 'abort') {
+      if (this._api) {
+        const sessionId = await this._sessionPromise?.catch(() => undefined);
+        if (sessionId) {
+          this._api.abort(sessionId).catch(() => {/* ignore */});
+        }
+      }
+      return;
+    }
+
+    if (msg.type === "getStatus") {
+      this._broadcast({ type: "status", ...this._lastStatus });
+      if (this._lastStatus.value === "ready" && !this._sessionPromise) {
+        this._fetchAndPostContext(webview);
+      }
+      return;
+    }
+
+    if (msg.type === "newSession") {
+      this.resetSession();
+      return;
+    }
+
+    if (msg.type === "pickAgent") {
+      const items = this._agents.map(a => ({
+        label: a.name,
+        description: a.description ?? "",
+      }));
+      const picked = await vscode.window.showQuickPick(items, {
+        title: "Select Agent",
+        placeHolder: "Choose an agent for this session",
+      });
+      if (picked && picked.label !== this._selection.agent) {
+        this._selection.agent = picked.label;
+        this._saveAgentSelection();
+        const update: Record<string, unknown> = { type: "contextUpdate", agent: picked.label };
+        // If the agent has a model preference, switch to it automatically
+        const agentDef = this._agents.find(a => a.name === picked.label);
+        if (agentDef?.model) {
+          this._selection.modelId = agentDef.model.modelID;
+          this._selection.providerID = agentDef.model.providerID;
+          update.modelId = agentDef.model.modelID;
+          update.providerID = agentDef.model.providerID;
+          const modelDef = this._models.find(
+            m => m.id === agentDef.model!.modelID && m.providerID === agentDef.model!.providerID
+          );
+          update.modelName = modelDef?.name ?? agentDef.model.modelID;
+        }
+        this._broadcast(update);
+      }
+      return;
+    }
+
+    if (msg.type === "pickModel") {
+      // Show only models with an explicit "active" status (or no status field).
+      const activeOnly = (models: Model[]): Model[] =>
+        models.filter(m => !m.status || m.status === "active");
+
+      // Group models by providerID, inserting separators between groups
+      const grouped = new Map<string, Model[]>();
+      for (const m of activeOnly(this._models)) {
+        const g = grouped.get(m.providerID) ?? [];
+        g.push(m);
+        g.sort((a, b) => (a.name || a.id).localeCompare(b.name || b.id));
+        grouped.set(m.providerID, g);
+      }
+      type ModelItem = vscode.QuickPickItem & { _model?: Model };
+      const items: ModelItem[] = [];
+      for (const [providerID, providerModels] of grouped) {
+        items.push({ label: providerID, kind: vscode.QuickPickItemKind.Separator } as ModelItem);
+        for (const m of providerModels) {
+          items.push({ label: m.name || m.id, _model: m });
+        }
+      }
+      const picked = await vscode.window.showQuickPick(items, {
+        title: "Select Model",
+        placeHolder: "Choose a model for this session",
+      });
+      if (picked && picked._model && (picked._model.id !== this._selection.modelId || picked._model.providerID !== this._selection.providerID)) {
+        this._selection.modelId = picked._model.id;
+        this._selection.providerID = picked._model.providerID;
+        this._selection.variant = undefined;
+        this._saveModelSelection();
+        this._updateCachedContextSelection();
+        // Reset session so next send uses the new model
+        this._unsubscribe?.();
+        this._unsubscribe = undefined;
+        this._sessionPromise = undefined;
+        this._broadcast({
+          type: "contextUpdate",
+          modelId: picked._model.id,
+          providerID: picked._model.providerID,
+          modelName: picked.label,
+          variants: picked._model.variants ? Object.keys(picked._model.variants) : [],
+        });
+      }
+      return;
+    }
+
+    if (msg.type === "pickVariant") {
+      const model = this._models.find(
+        m => m.id === this._selection.modelId && m.providerID === this._selection.providerID
+      );
+      const variantKeys = model?.variants ? Object.keys(model.variants) : [];
+      if (variantKeys.length === 0) return;
+      const picked = await vscode.window.showQuickPick(variantKeys, {
+        title: "Select Variant",
+        placeHolder: "Choose a model variant",
+      });
+      if (picked && picked !== this._selection.variant) {
+        this._selection.variant = picked;
+        this._saveModelSelection();
+        this._updateCachedContextSelection();
+        // Reset session so next send uses the new variant
+        this._unsubscribe?.();
+        this._unsubscribe = undefined;
+        this._sessionPromise = undefined;
+        this._broadcast({ type: "contextUpdate", variant: picked });
+      }
+      return;
+    }
+
+    if (msg.type === "fetchSessions") {
+      if (!this._api) return;
+      const activeId = await this._sessionPromise?.catch(() => undefined);
+      await this._pushSessionList(activeId ?? null);
+      return;
+    }
+
+    if (msg.type === "switchSession") {
+      if (!this._api || !msg.sessionId) return;
+      // Tear down current session without clearing the stored key yet
+      this._unsubscribe?.();
+      this._unsubscribe = undefined;
+      this._sessionPromise = undefined;
+      this._selection = {};
+      // Persist the requested session as the active one
+      this._context.workspaceState.update(this._sessionKey(), msg.sessionId);
+      // Re-subscribe to events for the new session
+      const { ready, unsubscribe } = this._api.subscribeEvents(
+        msg.sessionId,
+        (event) => { this._broadcast(event); },
+        () => { this._unsubscribe = undefined; }
+      );
+      this._unsubscribe = unsubscribe;
+      this._sessionPromise = Promise.resolve(msg.sessionId);
+      try {
+        await ready;
+        const history = await this._api.getSessionMessages(msg.sessionId, 50);
+        const messages = this._mapToWebviewMessages(history);
+        this._broadcast({
+          type: "sessionRestored",
+          messages,
+          current: { ...this._selection },
+        });
+      } catch {
+        this._broadcast({ type: "status", value: "error", message: "Failed to switch session" });
+      }
+      return;
+    }
+
+    if (msg.type === "deleteSession") {
+      if (!this._api || !msg.sessionId) return;
+      try {
+        await this._api.deleteSession(msg.sessionId);
+        // If we deleted the active session, reset to a blank slate
+        const activeId = await this._sessionPromise?.catch(() => undefined);
+        if (activeId === msg.sessionId) {
+          this.resetSession();
+        }
+      } catch { /* ignore */ }
+      const newActiveId = await this._sessionPromise?.catch(() => undefined);
+      await this._pushSessionList(newActiveId ?? null);
+      return;
+    }
+
+    if (msg.type === "renameSession") {
+      if (!this._api || !msg.sessionId || !msg.title) return;
+      try {
+        await this._api.updateSession(msg.sessionId, msg.title);
+      } catch { /* ignore */ }
+      const activeId = await this._sessionPromise?.catch(() => undefined);
+      await this._pushSessionList(activeId ?? null);
+      return;
+    }
+
+    if (msg.type === "forkSession") {
+      if (!this._api || !msg.sessionId) return;
+      try {
+        const newId = await this._api.forkSession(msg.sessionId);
+        // Switch to the forked session
+        this._unsubscribe?.();
+        this._unsubscribe = undefined;
+        this._sessionPromise = undefined;
+        this._selection = {};
+        this._context.workspaceState.update(this._sessionKey(), newId);
+        const { ready, unsubscribe } = this._api.subscribeEvents(
+          newId,
+          (event) => { this._broadcast(event); },
+          () => { this._unsubscribe = undefined; }
+        );
+        this._unsubscribe = unsubscribe;
+        this._sessionPromise = Promise.resolve(newId);
+        await ready;
+        const history = await this._api.getSessionMessages(newId, 50);
+        const messages = this._mapToWebviewMessages(history);
+        this._broadcast({
+          type: "sessionRestored",
+          messages,
+          current: { ...this._selection },
+        });
+        await this._pushSessionList(newId);
+      } catch {
+        this._broadcast({ type: "status", value: "error", message: "Failed to fork session" });
+      }
+      return;
+    }
+
+    if (msg.type === "questionReply") {
+      if (this._api && msg.requestID && Array.isArray(msg.answers)) {
+        this._api.questionReply(msg.requestID as string, msg.answers as string[][]).catch(() => {/* ignore */});
+      }
+      return;
+    }
+
+    if (msg.type === "questionReject") {
+      if (this._api && msg.requestID) {
+        this._api.questionReject(msg.requestID as string).catch(() => {/* ignore */});
+      }
+      return;
+    }
+
+    if (msg.type === "permissionReply") {
+      if (this._api && msg.requestID && msg.reply) {
+        this._api
+          .permissionReply(
+            msg.requestID as string,
+            msg.reply as "once" | "always" | "reject",
+            typeof msg.message === "string" ? msg.message : undefined
+          )
+          .catch(() => {/* ignore */});
+      }
+      return;
+    }
+
+    if (msg.type !== "send" && msg.type !== "editMessage") return;
+    if (!msg.text) return;
+
+    try {
+      const password = await this.secrets.get("opencode.password") ?? "";
+      const api = new OpenCodeClient(`http://localhost:${port}`, password);
+
+      const sessionId = await this._getOrCreateSession(api);
+
+      // Subscribe once per session, await stream open before sending
+      if (!this._unsubscribe) {
+        const { ready, unsubscribe } = api.subscribeEvents(
+          sessionId,
+          (event) => {
+            this._broadcast(event);
+          },
+          (err) => {
+            this._unsubscribe = undefined;
+            this._broadcast({
+              type: "status",
+              value: "error",
+              message: err.message,
+            });
+          }
+        );
+        this._unsubscribe = unsubscribe;
+        await ready;
+      }
+
+      if (msg.type === "editMessage" && msg.editMessageId) {
+        await api.revertSession(sessionId, msg.editMessageId);
+      }
+
+      await api.sendMessage(sessionId, msg.text, this._selection.agent);
+    } catch (err: unknown) {
+      // Clear dead session so the next send starts fresh
+      this._unsubscribe?.();
+      this._unsubscribe = undefined;
+      this._sessionPromise = undefined;
+      const message = err instanceof Error ? err.message : String(err);
+      this._broadcast({ type: "status", value: "error", message });
     }
   }
 
@@ -363,14 +760,11 @@ export class ChatPanel implements vscode.WebviewViewProvider {
       webviewView.webview.postMessage({ type: "context", ...stale });
     }
 
-    // Read settings fresh each time the view is resolved
-    const config = vscode.workspace.getConfiguration("opencode");
-    const port: number = config.get("port") ?? 4096;
-
     // Create an authenticated client for context fetching (same auth as send)
     // Password is read lazily so we recreate _api when the view resolves.
     // We store a reference so _fetchAndPostContext can use it.
     this.secrets.get("opencode.password").then((pw) => {
+      const port: number = vscode.workspace.getConfiguration("opencode").get("port") ?? 4096;
       this._api = new OpenCodeClient(`http://localhost:${port}`, pw ?? "");
       if (this._lastStatus.value === "ready" && this._currentView && !this._sessionPromise) {
         this._fetchAndPostContext(this._currentView.webview);
@@ -391,295 +785,11 @@ export class ChatPanel implements vscode.WebviewViewProvider {
     });
 
     // Handle messages from webview
-    webviewView.webview.onDidReceiveMessage(async (msg: { type: string; text?: string; requestID?: string; answers?: unknown; reply?: string; message?: string; sessionId?: string; title?: string; editMessageId?: string }) => {
-      if (msg.type === 'abort') {
-        if (this._api) {
-          const sessionId = await this._sessionPromise?.catch(() => undefined);
-          if (sessionId) {
-            this._api.abort(sessionId).catch(() => {/* ignore */});
-          }
-        }
-        return;
-      }
-
-      if (msg.type === "getStatus") {
-        webviewView.webview.postMessage({ type: "status", ...this._lastStatus });
-        if (this._lastStatus.value === "ready" && !this._sessionPromise) {
-          this._fetchAndPostContext(webviewView.webview);
-        }
-        return;
-      }
-
-      if (msg.type === "newSession") {
-        this.resetSession();
-        return;
-      }
-
-      if (msg.type === "pickAgent") {
-        const items = this._agents.map(a => ({
-          label: a.name,
-          description: a.description ?? "",
-        }));
-        const picked = await vscode.window.showQuickPick(items, {
-          title: "Select Agent",
-          placeHolder: "Choose an agent for this session",
-        });
-        if (picked && picked.label !== this._selection.agent) {
-          this._selection.agent = picked.label;
-          this._saveAgentSelection();
-          const update: Record<string, unknown> = { type: "contextUpdate", agent: picked.label };
-          // If the agent has a model preference, switch to it automatically
-          const agentDef = this._agents.find(a => a.name === picked.label);
-          if (agentDef?.model) {
-            this._selection.modelId = agentDef.model.modelID;
-            this._selection.providerID = agentDef.model.providerID;
-            update.modelId = agentDef.model.modelID;
-            update.providerID = agentDef.model.providerID;
-            const modelDef = this._models.find(
-              m => m.id === agentDef.model!.modelID && m.providerID === agentDef.model!.providerID
-            );
-            update.modelName = modelDef?.name ?? agentDef.model.modelID;
-          }
-          webviewView.webview.postMessage(update);
-        }
-        return;
-      }
-
-      if (msg.type === "pickModel") {
-        // Show only models with an explicit "active" status (or no status field).
-        const activeOnly = (models: Model[]): Model[] =>
-          models.filter(m => !m.status || m.status === "active");
-
-        // Group models by providerID, inserting separators between groups
-        const grouped = new Map<string, Model[]>();
-        for (const m of activeOnly(this._models)) {
-          const g = grouped.get(m.providerID) ?? [];
-          g.push(m);
-          g.sort((a, b) => (a.name || a.id).localeCompare(b.name || b.id));
-          grouped.set(m.providerID, g);
-        }
-        type ModelItem = vscode.QuickPickItem & { _model?: Model };
-        const items: ModelItem[] = [];
-        for (const [providerID, providerModels] of grouped) {
-          items.push({ label: providerID, kind: vscode.QuickPickItemKind.Separator } as ModelItem);
-          for (const m of providerModels) {
-            items.push({ label: m.name || m.id, _model: m });
-          }
-        }
-        const picked = await vscode.window.showQuickPick(items, {
-          title: "Select Model",
-          placeHolder: "Choose a model for this session",
-        });
-        if (picked && picked._model && (picked._model.id !== this._selection.modelId || picked._model.providerID !== this._selection.providerID)) {
-          this._selection.modelId = picked._model.id;
-          this._selection.providerID = picked._model.providerID;
-          this._selection.variant = undefined;
-          this._saveModelSelection();
-          this._updateCachedContextSelection();
-          // Reset session so next send uses the new model
-          this._unsubscribe?.();
-          this._unsubscribe = undefined;
-          this._sessionPromise = undefined;
-          webviewView.webview.postMessage({
-            type: "contextUpdate",
-            modelId: picked._model.id,
-            providerID: picked._model.providerID,
-            modelName: picked.label,
-            variants: picked._model.variants ? Object.keys(picked._model.variants) : [],
-          });
-        }
-        return;
-      }
-
-      if (msg.type === "pickVariant") {
-        const model = this._models.find(
-          m => m.id === this._selection.modelId && m.providerID === this._selection.providerID
-        );
-        const variantKeys = model?.variants ? Object.keys(model.variants) : [];
-        if (variantKeys.length === 0) return;
-        const picked = await vscode.window.showQuickPick(variantKeys, {
-          title: "Select Variant",
-          placeHolder: "Choose a model variant",
-        });
-        if (picked && picked !== this._selection.variant) {
-          this._selection.variant = picked;
-          this._saveModelSelection();
-          this._updateCachedContextSelection();
-          // Reset session so next send uses the new variant
-          this._unsubscribe?.();
-          this._unsubscribe = undefined;
-          this._sessionPromise = undefined;
-          webviewView.webview.postMessage({ type: "contextUpdate", variant: picked });
-        }
-        return;
-      }
-
-      if (msg.type === "fetchSessions") {
-        if (!this._api) return;
-        const activeId = await this._sessionPromise?.catch(() => undefined);
-        await this._pushSessionList(activeId ?? null);
-        return;
-      }
-
-      if (msg.type === "switchSession") {
-        if (!this._api || !msg.sessionId) return;
-        // Tear down current session without clearing the stored key yet
-        this._unsubscribe?.();
-        this._unsubscribe = undefined;
-        this._sessionPromise = undefined;
-        this._selection = {};
-        // Persist the requested session as the active one
-        this._context.workspaceState.update(this._sessionKey(), msg.sessionId);
-        // Re-subscribe to events for the new session
-        const { ready, unsubscribe } = this._api.subscribeEvents(
-          msg.sessionId,
-          (event) => { webviewView.webview.postMessage(event); },
-          () => { this._unsubscribe = undefined; }
-        );
-        this._unsubscribe = unsubscribe;
-        this._sessionPromise = Promise.resolve(msg.sessionId);
-        try {
-          await ready;
-          const history = await this._api.getSessionMessages(msg.sessionId, 50);
-          const messages = this._mapToWebviewMessages(history);
-          webviewView.webview.postMessage({
-            type: "sessionRestored",
-            messages,
-            current: { ...this._selection },
-          });
-        } catch {
-          webviewView.webview.postMessage({ type: "status", value: "error", message: "Failed to switch session" });
-        }
-        return;
-      }
-
-      if (msg.type === "deleteSession") {
-        if (!this._api || !msg.sessionId) return;
-        try {
-          await this._api.deleteSession(msg.sessionId);
-          // If we deleted the active session, reset to a blank slate
-          const activeId = await this._sessionPromise?.catch(() => undefined);
-          if (activeId === msg.sessionId) {
-            this.resetSession();
-          }
-        } catch { /* ignore */ }
-        const newActiveId = await this._sessionPromise?.catch(() => undefined);
-        await this._pushSessionList(newActiveId ?? null);
-        return;
-      }
-
-      if (msg.type === "renameSession") {
-        if (!this._api || !msg.sessionId || !msg.title) return;
-        try {
-          await this._api.updateSession(msg.sessionId, msg.title);
-        } catch { /* ignore */ }
-        const activeId = await this._sessionPromise?.catch(() => undefined);
-        await this._pushSessionList(activeId ?? null);
-        return;
-      }
-
-      if (msg.type === "forkSession") {
-        if (!this._api || !msg.sessionId) return;
-        try {
-          const newId = await this._api.forkSession(msg.sessionId);
-          // Switch to the forked session
-          this._unsubscribe?.();
-          this._unsubscribe = undefined;
-          this._sessionPromise = undefined;
-          this._selection = {};
-          this._context.workspaceState.update(this._sessionKey(), newId);
-          const { ready, unsubscribe } = this._api.subscribeEvents(
-            newId,
-            (event) => { webviewView.webview.postMessage(event); },
-            () => { this._unsubscribe = undefined; }
-          );
-          this._unsubscribe = unsubscribe;
-          this._sessionPromise = Promise.resolve(newId);
-          await ready;
-          const history = await this._api.getSessionMessages(newId, 50);
-          const messages = this._mapToWebviewMessages(history);
-          webviewView.webview.postMessage({
-            type: "sessionRestored",
-            messages,
-            current: { ...this._selection },
-          });
-          await this._pushSessionList(newId);
-        } catch {
-          webviewView.webview.postMessage({ type: "status", value: "error", message: "Failed to fork session" });
-        }
-        return;
-      }
-
-      if (msg.type === "questionReply") {
-        if (this._api && msg.requestID && Array.isArray(msg.answers)) {
-          this._api.questionReply(msg.requestID as string, msg.answers as string[][]).catch(() => {/* ignore */});
-        }
-        return;
-      }
-
-      if (msg.type === "questionReject") {
-        if (this._api && msg.requestID) {
-          this._api.questionReject(msg.requestID as string).catch(() => {/* ignore */});
-        }
-        return;
-      }
-
-      if (msg.type === "permissionReply") {
-        if (this._api && msg.requestID && msg.reply) {
-          this._api
-            .permissionReply(
-              msg.requestID as string,
-              msg.reply as "once" | "always" | "reject",
-              typeof msg.message === "string" ? msg.message : undefined
-            )
-            .catch(() => {/* ignore */});
-        }
-        return;
-      }
-
-      if (msg.type !== "send" && msg.type !== "editMessage") return;
-      if (!msg.text) return;
-
-      try {
-        const password = await this.secrets.get("opencode.password") ?? "";
-        const api = new OpenCodeClient(`http://localhost:${port}`, password);
-
-        const sessionId = await this._getOrCreateSession(api);
-
-        // Subscribe once per session, await stream open before sending
-        if (!this._unsubscribe) {
-          const { ready, unsubscribe } = api.subscribeEvents(
-            sessionId,
-            (event) => {
-              webviewView.webview.postMessage(event);
-            },
-            (err) => {
-              this._unsubscribe = undefined;
-              webviewView.webview.postMessage({
-                type: "status",
-                value: "error",
-                message: err.message,
-              });
-            }
-          );
-          this._unsubscribe = unsubscribe;
-          await ready;
-        }
-
-        if (msg.type === "editMessage" && msg.editMessageId) {
-          await api.revertSession(sessionId, msg.editMessageId);
-        }
-
-        await api.sendMessage(sessionId, msg.text, this._selection.agent);
-      } catch (err: unknown) {
-        // Clear dead session so the next send starts fresh
-        this._unsubscribe?.();
-        this._unsubscribe = undefined;
-        this._sessionPromise = undefined;
-        const message = err instanceof Error ? err.message : String(err);
-        webviewView.webview.postMessage({ type: "status", value: "error", message });
-      }
-    });
+    webviewView.webview.onDidReceiveMessage(
+      (msg) => this._handleMessage(webviewView.webview, msg),
+      undefined,
+      []
+    );
 
     // Clean up when the view is disposed/hidden
     webviewView.onDidDispose(() => {
