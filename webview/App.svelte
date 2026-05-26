@@ -37,6 +37,7 @@
   let status: 'connecting' | 'ready' | 'error' = 'connecting';
   let statusMessage = '';
   let messageListEl: HTMLElement;
+  let chatInputEl: HTMLTextAreaElement;
 
   // Pending question / permission state
   let pendingQuestion: QuestionRequest | null = null;
@@ -102,10 +103,21 @@
   }
 
   function scrollToBottom() {
-    if (messageListEl && _shouldStick) {
-      requestAnimationFrame(() => {
+    if (!messageListEl) return;
+    requestAnimationFrame(() => {
+      if (messageListEl && _shouldStick) {
         messageListEl.scrollTop = messageListEl.scrollHeight;
-      });
+      }
+    });
+  }
+
+  // VSCode sidebar webviews don't forward wheel events until the webview has
+  // received a user interaction (click / drag).  Focusing the scroll container
+  // on mouseenter means a hover is enough to unblock wheel scrolling, without
+  // stealing keyboard focus from the chat input.
+  function handleMessageListMouseEnter() {
+    if (document.activeElement !== chatInputEl) {
+      messageListEl?.focus({ preventScroll: true });
     }
   }
 
@@ -676,7 +688,9 @@
   {/if}
 
   <!-- Message list -->
-  <div class="message-list" bind:this={messageListEl} on:scroll={onScroll}>
+  <div class="message-list" bind:this={messageListEl} on:scroll={onScroll}
+       role="log" aria-label="Chat messages" aria-live="polite"
+       tabindex="-1" on:mouseenter={handleMessageListMouseEnter}>
     {#each messages as msg (msg.id)}
       {#if msg.kind === 'user'}
         <div class="message user-message">
@@ -806,6 +820,7 @@
       class="chat-input"
       placeholder="Type a message…"
       bind:value={inputText}
+      bind:this={chatInputEl}
       on:keydown={handleKeydown}
       rows="1"
       disabled={!!pendingQuestion || !!pendingPermission}
@@ -859,6 +874,7 @@
     display: flex;
     flex-direction: column;
     gap: 10px;
+    outline: none; /* suppress focus ring — element only receives focus for wheel events */
   }
 
   .message {
