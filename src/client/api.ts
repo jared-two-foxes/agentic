@@ -34,11 +34,22 @@ export type EventSessionStatus = {
   };
 };
 
+/** Fired when a new (possibly child) session is created */
+export type EventSessionCreated = {
+  type: "session.created";
+  id: string;
+  properties: {
+    sessionID: string; // the new child session's ID
+    info: SessionInfo; // info.parentID holds the parent session ID
+  };
+};
+
 /** Catch-all for events we don't specifically handle */
 export type OpenCodeEvent =
   | EventMessagePartDelta
   | EventSessionIdle
   | EventSessionStatus
+  | EventSessionCreated
   | { type: string; id: string; properties?: Record<string, unknown> };
 
 // ---------------------------------------------------------------------------
@@ -81,6 +92,7 @@ export type SessionInfo = {
   title: string;
   directory: string;
   time: { created: number; updated: number };
+  parentID?: string;
 };
 
 /** A text part inside a historical session message */
@@ -336,10 +348,19 @@ export class OpenCodeClient {
                 properties?: Record<string, unknown>;
               };
 
-              // Filter: only drop events where properties.sessionID is
-              // defined AND does not match the target sessionId.
-              const sid = event.properties?.sessionID;
-              if (sid !== undefined && sid !== sessionId) {
+              // Filter: pass events for the target session, AND pass
+              // session.created events where info.parentID === sessionId
+              // (so ChatPanel can detect child session spawns).
+              //
+              // Note: for session.created, properties.sessionID is the *child's*
+              // ID (not the parent's), so it would otherwise be filtered out.
+              // We rescue it via the isChildCreatedForThisSession check.
+              const sid = event.properties?.sessionID as string | undefined;
+              const isTargetSession = sid === sessionId;
+              const isChildCreatedForThisSession =
+                event.type === "session.created" &&
+                (event as EventSessionCreated).properties?.info?.parentID === sessionId;
+              if (sid !== undefined && !isTargetSession && !isChildCreatedForThisSession) {
                 continue;
               }
 

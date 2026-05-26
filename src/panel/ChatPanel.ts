@@ -3,7 +3,7 @@ import * as crypto from "crypto";
 import * as fs from "fs";
 import * as path from "path";
 import { OpenCodeClient } from "../client/api";
-import type { Agent, Model, CurrentSelection, SessionMessageItem } from "../client/api";
+import type { Agent, Model, CurrentSelection, SessionMessageItem, EventSessionCreated, OpenCodeEvent } from "../client/api";
 import { ServerManager, ServerStatus } from "../server";
 
 /** Shape persisted to workspaceState so chips can be shown before the server is ready. */
@@ -18,6 +18,7 @@ export class ChatPanel implements vscode.WebviewViewProvider {
   public static readonly maximizeCommand = "opencode.maximizeChat";
 
   private _unsubscribe: (() => void) | undefined;
+  private _childUnsubscribes = new Map<string, () => void>();
   private _sessionPromise: Promise<string> | undefined;
   private _currentView: vscode.WebviewView | undefined;
   private _lastStatus: ServerStatus = { value: "connecting" };
@@ -230,17 +231,19 @@ export class ChatPanel implements vscode.WebviewViewProvider {
     for (const item of history) {
       const { info, parts } = item;
       const textParts = parts.filter(p => p.type === "text" && typeof p.text === "string");
+      const reasoningParts = parts.filter(p => p.type === "reasoning" && typeof p.text === "string");
+      // TODO: restore subtask history — child sessions have their own message history and are not surfaced here
       if (info.role === "user") {
         const text = textParts.map(p => p.text ?? "").join("").trim();
         if (!text) continue;
         result.push({ kind: "user", id: uid(), serverId: info.id, text });
       } else if (info.role === "assistant") {
-        if (textParts.length === 0) continue;
-        result.push({
-          kind: "assistant",
-          id: uid(),
-          parts: textParts.map(p => ({ type: "text", partID: p.id, text: p.text ?? "" })),
-        });
+        const allParts: unknown[] = [
+          ...reasoningParts.map(p => ({ type: "reasoning", partID: p.id, text: p.text ?? "", done: true })),
+          ...textParts.map(p => ({ type: "text", partID: p.id, text: p.text ?? "" })),
+        ];
+        if (allParts.length === 0) continue;
+        result.push({ kind: "assistant", id: uid(), parts: allParts });
       }
     }
     return result;
@@ -319,6 +322,7 @@ export class ChatPanel implements vscode.WebviewViewProvider {
   resetSession(): void {
     this._unsubscribe?.();
     this._unsubscribe = undefined;
+    this._tearDownChildSubs();
     this._sessionPromise = undefined;
     this._selection = {};
     this._context.workspaceState.update(this._sessionKey(), undefined);
@@ -329,6 +333,53 @@ export class ChatPanel implements vscode.WebviewViewProvider {
     if (this._lastStatus.value === "ready" && this._currentView) {
       this._fetchAndPostContext(this._currentView.webview, false);
     }
+  }
+
+  /** Unsubscribe from all active child session SSE streams. */
+  private _tearDownChildSubs(): void {
+    for (const unsub of this._childUnsubscribes.values()) {
+      unsub();
+    }
+    this._childUnsubscribes.clear();
+  }
+
+  /** Returns an event handler for a parent session that detects child session spawns,
+   *  subscribes to their SSE streams, and broadcasts all events to the webview. */
+  private _makeParentEventHandler(
+    _sessionId: string,
+    apiClient: OpenCodeClient
+  ): (event: OpenCodeEvent) => void {
+    return (event) => {
+      if (event.type === "session.created") {
+        const created = event as EventSessionCreated;
+        const childId = created.properties?.sessionID;
+        const MAX_CHILD_SESSIONS = 10;
+        if (childId && !this._childUnsubscribes.has(childId) && this._childUnsubscribes.size < MAX_CHILD_SESSIONS) {
+          const { unsubscribe: childUnsub } = apiClient.subscribeEvents(
+            childId,
+            (childEvent) => {
+              // Prune on child idle before deciding whether to forward
+              if (childEvent.type === "session.idle") {
+                const unsub = this._childUnsubscribes.get(childId);
+                if (unsub) {
+                  unsub();
+                  this._childUnsubscribes.delete(childId);
+                }
+                // Do NOT broadcast child idle — it would set isThinking=false in the parent webview
+                return;
+              }
+              // Suppress child session lifecycle events that have no meaning in the parent UI context
+              if (childEvent.type === "session.status") {
+                return;
+              }
+              this._broadcast(childEvent);
+            }
+          );
+          this._childUnsubscribes.set(childId, childUnsub);
+        }
+      }
+      this._broadcast(event);
+    };
   }
 
   /**
@@ -574,6 +625,7 @@ export class ChatPanel implements vscode.WebviewViewProvider {
       // Tear down current session without clearing the stored key yet
       this._unsubscribe?.();
       this._unsubscribe = undefined;
+      this._tearDownChildSubs();
       this._sessionPromise = undefined;
       this._selection = {};
       // Persist the requested session as the active one
@@ -581,7 +633,7 @@ export class ChatPanel implements vscode.WebviewViewProvider {
       // Re-subscribe to events for the new session
       const { ready, unsubscribe } = this._api.subscribeEvents(
         msg.sessionId,
-        (event) => { this._broadcast(event); },
+        this._makeParentEventHandler(msg.sessionId, this._api),
         () => { this._unsubscribe = undefined; }
       );
       this._unsubscribe = unsubscribe;
@@ -633,12 +685,13 @@ export class ChatPanel implements vscode.WebviewViewProvider {
         // Switch to the forked session
         this._unsubscribe?.();
         this._unsubscribe = undefined;
+        this._tearDownChildSubs();
         this._sessionPromise = undefined;
         this._selection = {};
         this._context.workspaceState.update(this._sessionKey(), newId);
         const { ready, unsubscribe } = this._api.subscribeEvents(
           newId,
-          (event) => { this._broadcast(event); },
+          this._makeParentEventHandler(newId, this._api),
           () => { this._unsubscribe = undefined; }
         );
         this._unsubscribe = unsubscribe;
@@ -698,9 +751,7 @@ export class ChatPanel implements vscode.WebviewViewProvider {
       if (!this._unsubscribe) {
         const { ready, unsubscribe } = api.subscribeEvents(
           sessionId,
-          (event) => {
-            this._broadcast(event);
-          },
+          this._makeParentEventHandler(sessionId, api),
           (err) => {
             this._unsubscribe = undefined;
             this._broadcast({
@@ -795,6 +846,7 @@ export class ChatPanel implements vscode.WebviewViewProvider {
     webviewView.onDidDispose(() => {
       this._unsubscribe?.();
       this._unsubscribe = undefined;
+      this._tearDownChildSubs();
       if (this._currentView === webviewView) {
         this._currentView = undefined;
       }

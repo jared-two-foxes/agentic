@@ -12,7 +12,9 @@
 
   // Types
   type TextPart = { type: 'text'; partID: string; text: string };
-  type AssistantPart = TextPart;
+  type ReasoningPart = { type: 'reasoning'; partID: string; text: string; done: boolean };
+  type SubtaskPart = { type: 'subtask'; childSessionID: string; agentName?: string; parts: TextPart[] };
+  type AssistantPart = TextPart | ReasoningPart | SubtaskPart;
   type UserMessage = { kind: 'user'; id: string; serverId?: string; text: string };
   type AssistantMessage = { kind: 'assistant'; id: string; parts: AssistantPart[] };
   type ErrorMessage = { kind: 'error'; id: string; text: string };
@@ -83,6 +85,9 @@
   // Whether the model is currently generating a response
   let isThinking = false;
 
+  // Known child session IDs (for routing sub-agent stream deltas)
+  const childSessionIds = new Set<string>();
+
   // Edit state — set when the user clicks the pencil on a user bubble
   let editingMessageId: string | null = null;   // local msg.id of the bubble being edited
   let editingServerId: string | null = null;     // server-side messageID for the revert call
@@ -117,11 +122,43 @@
   /** Append a text delta to the part identified by partID, creating it if needed */
   function applyTextDelta(partID: string, delta: string) {
     const assistantMsg = getOrCreateAssistantMessage();
-    const existing = assistantMsg.parts.find(p => p.partID === partID);
+    const existing = assistantMsg.parts.find(p => p.type !== 'subtask' && p.partID === partID) as TextPart | undefined;
     if (existing) {
       existing.text += delta;
     } else {
       assistantMsg.parts = [...assistantMsg.parts, { type: 'text', partID, text: delta }];
+    }
+    messages = [...messages];
+    scrollToBottom();
+  }
+
+  /** Append a reasoning delta to the part identified by partID, creating it if needed */
+  function applyReasoningDelta(partID: string, delta: string) {
+    const assistantMsg = getOrCreateAssistantMessage();
+    const existing = assistantMsg.parts.find(p => p.type === 'reasoning' && p.partID === partID) as ReasoningPart | undefined;
+    if (existing && existing.type === 'reasoning') {
+      existing.text += delta;
+    } else {
+      assistantMsg.parts = [...assistantMsg.parts, { type: 'reasoning', partID, text: delta, done: false }];
+    }
+    messages = [...messages];
+    scrollToBottom();
+  }
+
+  /** Append a text delta into the SubtaskPart for the given child session */
+  function applySubtaskDelta(childSessionID: string, partID: string, delta: string) {
+    // Child deltas before SubtaskPart placeholder is created are dropped intentionally
+    const assistantMsg = messages[messages.length - 1];
+    if (!assistantMsg || assistantMsg.kind !== 'assistant') return;
+    const subtask = assistantMsg.parts.find(
+      p => p.type === 'subtask' && (p as SubtaskPart).childSessionID === childSessionID
+    ) as SubtaskPart | undefined;
+    if (!subtask) return; // placeholder not yet created — intentionally dropped
+    const existingPart = subtask.parts.find(p => p.partID === partID);
+    if (existingPart) {
+      existingPart.text += delta;
+    } else {
+      subtask.parts = [...subtask.parts, { type: 'text', partID, text: delta }];
     }
     messages = [...messages];
     scrollToBottom();
@@ -356,7 +393,15 @@
         }
         case 'message.part.delta': {
           const props = data.properties ?? {};
-          if (props.field === 'text' && typeof props.delta === 'string' && typeof props.partID === 'string') {
+          if (typeof props.delta !== 'string' || typeof props.partID !== 'string') break;
+          const sessionID = props.sessionID as string | undefined;
+          const isChild = sessionID != null && childSessionIds.has(sessionID);
+          if (isChild) {
+            // Route ALL child deltas (text or reasoning) into the subtask card
+            applySubtaskDelta(sessionID!, props.partID, props.delta);
+          } else if (props.field === 'reasoning') {
+            applyReasoningDelta(props.partID, props.delta);
+          } else if (props.field === 'text') {
             applyTextDelta(props.partID, props.delta);
           }
           break;
@@ -411,6 +456,21 @@
           isThinking = false;
           break;
         }
+        case 'session.created': {
+          // A child (sub-agent) session was spawned; create a SubtaskPart placeholder
+          const childId = data.properties?.sessionID as string | undefined;
+          const agentName = data.properties?.info?.title as string | undefined;
+          if (!childId) break;
+          childSessionIds.add(childId);
+          const assistantMsg = getOrCreateAssistantMessage();
+          assistantMsg.parts = [
+            ...assistantMsg.parts,
+            { type: 'subtask', childSessionID: childId, agentName, parts: [] } as SubtaskPart,
+          ];
+          messages = [...messages];
+          scrollToBottom();
+          break;
+        }
         case 'newSession': {
           messages = [];
           isThinking = false;
@@ -431,6 +491,8 @@
           questionAnswers = [];
           customAnswers   = [];
           pendingPermission = null;
+          // Clear child session tracking
+          childSessionIds.clear();
           // Clear session panel
           showSessionPanel = false;
           currentSessionTitle = undefined;
@@ -446,6 +508,7 @@
         case 'sessionRestored': {
           messages = Array.isArray(data.messages) ? data.messages as Message[] : [];
           isThinking = false;
+          childSessionIds.clear();
           // Reset prompt history for the restored session
           historyStack = [];
           historyCursor = 0;
@@ -624,9 +687,26 @@
         </div>
       {:else if msg.kind === 'assistant'}
         <div class="message assistant-message">
-          {#each msg.parts as part (part.partID)}
+          {#each msg.parts as part (part.type === 'subtask' ? part.childSessionID : part.partID)}
             {#if part.type === 'text'}
               <div class="assistant-text">{@html renderMarkdown(part.text)}</div>
+            {:else if part.type === 'reasoning'}
+              <details class="reasoning-block">
+                <summary class="reasoning-summary">Thinking…</summary>
+                <div class="reasoning-body">{part.text}</div>
+              </details>
+            {:else if part.type === 'subtask'}
+              <div class="subtask-card">
+                <div class="subtask-header">
+                  <span class="subtask-icon">⟳</span>
+                  <span class="subtask-label">{part.agentName ?? 'Subagent'}</span>
+                </div>
+                <div class="subtask-body">
+                  {#each part.parts as sp (sp.partID)}
+                    <div class="subtask-text">{sp.text}</div>
+                  {/each}
+                </div>
+              </div>
             {/if}
           {/each}
         </div>
@@ -1550,5 +1630,81 @@
 
   .loading-retry-btn:hover {
     border-color: var(--vscode-focusBorder);
+  }
+
+  /* ── Reasoning block ──────────────────────────────────────────────────── */
+  .reasoning-block {
+    margin: 4px 0;
+    border: 1px solid var(--vscode-panel-border, #444);
+    border-radius: 4px;
+    background: var(--vscode-textCodeBlock-background, rgba(128,128,128,0.08));
+    font-size: 12px;
+    overflow: hidden;
+  }
+
+  .reasoning-summary {
+    padding: 4px 10px;
+    cursor: pointer;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    opacity: 0.6;
+    list-style: none;
+    user-select: none;
+  }
+  .reasoning-summary::-webkit-details-marker { display: none; }
+  .reasoning-summary::before { content: '▶ '; font-size: 8px; }
+  details[open] .reasoning-summary::before { content: '▼ '; }
+
+  .reasoning-body {
+    padding: 6px 10px;
+    white-space: pre-wrap;
+    word-break: break-word;
+    opacity: 0.75;
+    font-size: 12px;
+    line-height: 1.5;
+    border-top: 1px solid var(--vscode-panel-border, #444);
+  }
+
+  /* ── Subtask card ─────────────────────────────────────────────────────── */
+  .subtask-card {
+    margin: 6px 0;
+    margin-left: 12px;
+    border: 1px solid var(--vscode-panel-border, #444);
+    border-left: 3px solid var(--vscode-charts-blue, #4fc1ff);
+    border-radius: 4px;
+    background: var(--vscode-textCodeBlock-background, rgba(128,128,128,0.08));
+    overflow: hidden;
+  }
+
+  .subtask-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 10px;
+    border-bottom: 1px solid var(--vscode-panel-border, #444);
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    opacity: 0.7;
+  }
+
+  .subtask-icon {
+    font-size: 11px;
+    opacity: 0.8;
+  }
+
+  .subtask-body {
+    padding: 6px 10px;
+    font-size: 12px;
+    line-height: 1.5;
+    word-break: break-word;
+  }
+
+  .subtask-text {
+    white-space: pre-wrap;
+    opacity: 0.85;
   }
 </style>
