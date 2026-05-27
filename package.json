@@ -115,6 +115,11 @@
           "type": "boolean",
           "default": false,
           "description": "Automatically approve shell command tool calls (bash) without prompting."
+        },
+        "opencode.autoApprove.fileReads": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically approve file read tool calls (read, glob, grep) without prompting."
         }
       }
     }

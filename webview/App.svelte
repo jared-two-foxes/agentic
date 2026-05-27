@@ -958,6 +958,7 @@
                 commandString={part.commandString}
                 onApprove={part.pendingApprovalID ? () => { vscode.postMessage({ type: 'permissionReply', requestID: part.pendingApprovalID, reply: 'once' }); part.status = 'running'; part.pendingApprovalID = undefined; messages = [...messages]; } : undefined}
                 onReject={part.pendingApprovalID ? () => { vscode.postMessage({ type: 'permissionReply', requestID: part.pendingApprovalID, reply: 'reject' }); part.status = 'error'; part.result = 'Rejected by user'; part.pendingApprovalID = undefined; messages = [...messages]; } : undefined}
+                onOpenSettings={() => vscode.postMessage({ type: 'openSettings' })}
                 onOpenDiff={(fp, orig, mod) => vscode.postMessage({ type: 'openDiff', filePath: fp, original: orig, modified: mod })}
               />
             {/if}

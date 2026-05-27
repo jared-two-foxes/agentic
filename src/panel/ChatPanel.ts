@@ -354,6 +354,11 @@ export class ChatPanel implements vscode.WebviewViewProvider {
     return name === 'bash' || name === 'Bash';
   }
 
+  /** Returns true for tool names that read files or search the filesystem. */
+  private static _isReadToolName(name: string): boolean {
+    return ['read', 'Read', 'glob', 'Glob', 'grep', 'Grep'].includes(name);
+  }
+
   /** Returns an event handler for a parent session that detects child session spawns,
    *  subscribes to their SSE streams, and broadcasts all events to the webview. */
   private _makeParentEventHandler(
@@ -447,6 +452,15 @@ export class ChatPanel implements vscode.WebviewViewProvider {
           const autoApprove = vscode.workspace
             .getConfiguration("opencode")
             .get<boolean>("autoApprove.commands", false);
+          if (autoApprove && this._api) {
+            this._api.permissionReply(permId, "once").catch(() => {/* ignore */});
+            return; // do not broadcast to webview
+          }
+        }
+        if (permId && permName && ChatPanel._isReadToolName(permName)) {
+          const autoApprove = vscode.workspace
+            .getConfiguration("opencode")
+            .get<boolean>("autoApprove.fileReads", true);
           if (autoApprove && this._api) {
             this._api.permissionReply(permId, "once").catch(() => {/* ignore */});
             return; // do not broadcast to webview
@@ -837,7 +851,7 @@ export class ChatPanel implements vscode.WebviewViewProvider {
     }
 
     if (msg.type === "openSettings") {
-      vscode.commands.executeCommand("workbench.action.openSettings", "opencode");
+      vscode.commands.executeCommand("workbench.action.openSettings", "opencode.autoApprove");
       return;
     }
 

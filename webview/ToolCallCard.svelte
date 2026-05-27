@@ -16,6 +16,7 @@
   export let pendingApprovalID: string | undefined = undefined;
   export let onApprove: (() => void) | undefined = undefined;
   export let onReject: (() => void) | undefined = undefined;
+  export let onOpenSettings: (() => void) | undefined = undefined;
   export let commandString: string | undefined = undefined;
 
   $: meta = getToolMeta(toolName);
@@ -71,6 +72,7 @@
       <span class="approval-label">{commandString ? 'Run this command?' : 'Approve this file write?'}</span>
       <button class="approval-approve" on:click={() => onApprove && onApprove()}>Approve</button>
       <button class="approval-reject"  on:click={() => onReject && onReject()}>Reject</button>
+      <button class="approval-settings-link" on:click={() => onOpenSettings && onOpenSettings()}>Configure auto-approve →</button>
     </div>
   {/if}
   {#if expanded}
@@ -230,6 +232,18 @@
     opacity: 0.8;
   }
   .approval-reject:hover { opacity: 1; }
+
+  .approval-settings-link {
+    background: none;
+    border: none;
+    color: var(--vscode-textLink-foreground, #4daafc);
+    cursor: pointer;
+    font-size: 0.75em;
+    padding: 0;
+    margin-left: auto;
+    text-decoration: underline;
+  }
+  .approval-settings-link:hover { opacity: 0.8; }
 
   .command-preview {
     font-family: var(--vscode-editor-font-family, monospace);
