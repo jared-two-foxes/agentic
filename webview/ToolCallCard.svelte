@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { getToolMeta } from './toolMeta';
+  import { getToolMeta, COLLAPSE_THRESHOLD } from './toolMeta';
 
   export let toolName: string;
   export let summary: string;
@@ -20,10 +20,23 @@
     status === 'completed' ? '✓' :
     status === 'error'     ? '✕' :
     /* pending */            '○';
+
+  let expanded = false;
+  $: if (status === 'error') expanded = true;
+
+  // Result collapse logic
+  $: resultLines = result !== undefined ? String(result).split('\n') : [];
+  $: resultCollapsible = resultLines.length > COLLAPSE_THRESHOLD;
+  let showAllResult = false;
 </script>
 
 <div class="tool-card" style="border-left-color: {borderColor};">
-  <div class="tool-header">
+  <div class="tool-header" on:click={() => expanded = !expanded} role="button" tabindex="0"
+       on:keydown={(e) => { if (e.key === 'Enter' || e.key === ' ') expanded = !expanded; }}>
+    <button class="tool-chevron" on:click|stopPropagation={() => expanded = !expanded}
+            aria-label={expanded ? 'Collapse' : 'Expand'}>
+      {expanded ? '▼' : '▶'}
+    </button>
     <span class="tool-icon">{meta.icon}</span>
     <span class="tool-label">{meta.label}</span>
     {#if summary}
@@ -32,20 +45,32 @@
     {/if}
     <span class="status-badge status-{status}">{statusIcon} {status}</span>
   </div>
-  <div class="tool-body">
-    {#if params !== undefined}
-      <div class="tool-section">
-        <div class="tool-section-label">Params</div>
-        <pre class="tool-pre">{JSON.stringify(params, null, 2)}</pre>
-      </div>
-    {/if}
-    {#if result !== undefined}
-      <div class="tool-section">
-        <div class="tool-section-label">Result</div>
-        <pre class="tool-pre">{String(result)}</pre>
-      </div>
-    {/if}
-  </div>
+  {#if expanded}
+    <div class="tool-body">
+      {#if params !== undefined}
+        <div class="tool-section">
+          <div class="tool-section-label">Params</div>
+          <pre class="tool-pre">{JSON.stringify(params, null, 2)}</pre>
+        </div>
+      {/if}
+      {#if result !== undefined}
+        <div class="tool-section">
+          <div class="tool-section-label">Result</div>
+          {#if resultCollapsible && !showAllResult}
+            <pre class="tool-pre">{resultLines.slice(0, COLLAPSE_THRESHOLD).join('\n')}</pre>
+            <button class="show-more" on:click={() => showAllResult = true}>
+              Show {resultLines.length - COLLAPSE_THRESHOLD} more lines
+            </button>
+          {:else}
+            <pre class="tool-pre">{String(result)}</pre>
+            {#if resultCollapsible}
+              <button class="show-less" on:click={() => showAllResult = false}>Show less</button>
+            {/if}
+          {/if}
+        </div>
+      {/if}
+    </div>
+  {/if}
 </div>
 
 <style>
@@ -65,12 +90,27 @@
     padding: 6px 10px;
     border-bottom: 1px solid var(--vscode-panel-border, #444);
     font-size: 12px;
+    cursor: pointer;
+    user-select: none;
+  }
+  .tool-header:hover {
+    background: var(--vscode-list-hoverBackground, rgba(255,255,255,0.05));
   }
 
-  .tool-icon {
+  .tool-chevron {
     flex-shrink: 0;
-    font-size: 13px;
+    background: none;
+    border: none;
+    color: inherit;
+    cursor: pointer;
+    padding: 0 2px;
+    font-size: 9px;
+    opacity: 0.6;
+    line-height: 1;
   }
+  .tool-chevron:hover { opacity: 1; }
+
+  .tool-icon { flex-shrink: 0; font-size: 13px; }
 
   .tool-label {
     font-size: 11px;
@@ -81,10 +121,7 @@
     white-space: nowrap;
   }
 
-  .tool-sep {
-    opacity: 0.4;
-    flex-shrink: 0;
-  }
+  .tool-sep { opacity: 0.4; flex-shrink: 0; }
 
   .tool-summary {
     font-size: 11px;
@@ -116,21 +153,17 @@
     from { transform: rotate(0deg); }
     to   { transform: rotate(360deg); }
   }
-
   .status-badge.status-running {
     animation: spin 1.2s linear infinite;
     display: inline-block;
   }
 
   .tool-body {
-    display: none; /* expanded in FS3.4 */
     padding: 8px 10px;
     font-size: 12px;
   }
 
-  .tool-section {
-    margin-bottom: 8px;
-  }
+  .tool-section { margin-bottom: 8px; }
 
   .tool-section-label {
     font-size: 10px;
@@ -151,4 +184,20 @@
     padding: 6px 8px;
     border-radius: 4px;
   }
+
+  .show-more,
+  .show-less {
+    display: block;
+    margin-top: 4px;
+    background: none;
+    border: none;
+    color: var(--vscode-textLink-foreground, #4fc1ff);
+    font-size: 11px;
+    cursor: pointer;
+    padding: 2px 0;
+    text-align: left;
+    opacity: 0.8;
+  }
+  .show-more:hover,
+  .show-less:hover { opacity: 1; text-decoration: underline; }
 </style>

@@ -26,6 +26,8 @@ export const TOOL_META: Record<string, ToolMeta> = {
 
 const FALLBACK: ToolMeta = { icon: '🔧', label: '' };
 
+export const COLLAPSE_THRESHOLD = 10;
+
 export function getToolMeta(toolName: string): ToolMeta {
   return TOOL_META[toolName] ?? { icon: FALLBACK.icon, label: toolName };
 }
