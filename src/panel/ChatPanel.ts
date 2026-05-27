@@ -738,6 +738,11 @@ export class ChatPanel implements vscode.WebviewViewProvider {
       return;
     }
 
+    if (msg.type === "openSettings") {
+      vscode.commands.executeCommand("workbench.action.openSettings", "opencode");
+      return;
+    }
+
     if (msg.type !== "send" && msg.type !== "editMessage") return;
     if (!msg.text) return;
 
