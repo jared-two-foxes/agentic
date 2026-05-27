@@ -5,7 +5,7 @@
 
   export let toolName: string;
   export let summary: string;
-  export let status: 'pending' | 'running' | 'completed' | 'error' = 'pending';
+  export let status: 'pending' | 'running' | 'completed' | 'error' | 'pending-approval' = 'pending';
   export let params: unknown = undefined;
   export let result: unknown = undefined;
   export let diffHunks: Change[] | null = null;
@@ -13,20 +13,25 @@
   export let originalContent: string | undefined = undefined;
   export let newContent: string | undefined = undefined;
   export let onOpenDiff: ((filePath: string, original: string, modified: string) => void) | undefined = undefined;
+  export let pendingApprovalID: string | undefined = undefined;
+  export let onApprove: (() => void) | undefined = undefined;
+  export let onReject: (() => void) | undefined = undefined;
 
   $: meta = getToolMeta(toolName);
 
   $: borderColor =
-    status === 'running'   ? 'var(--vscode-charts-blue, #4fc1ff)' :
-    status === 'completed' ? 'var(--vscode-testing-iconPassed, #89ca78)' :
-    status === 'error'     ? 'var(--vscode-charts-red, #e06c75)' :
-    /* pending */            'var(--vscode-panel-border, #444)';
+    status === 'running'           ? 'var(--vscode-charts-blue, #4fc1ff)' :
+    status === 'completed'         ? 'var(--vscode-testing-iconPassed, #89ca78)' :
+    status === 'error'             ? 'var(--vscode-charts-red, #e06c75)' :
+    status === 'pending-approval'  ? 'var(--vscode-charts-yellow, #e5c07b)' :
+    /* pending */                    'var(--vscode-panel-border, #444)';
 
   $: statusIcon =
-    status === 'running'   ? '◌' :
-    status === 'completed' ? '✓' :
-    status === 'error'     ? '✕' :
-    /* pending */            '○';
+    status === 'running'           ? '◌' :
+    status === 'completed'         ? '✓' :
+    status === 'error'             ? '✕' :
+    status === 'pending-approval'  ? '⏸' :
+    /* pending */                    '○';
 
   let expanded = false;
   $: if (status === 'error') expanded = true;
@@ -52,6 +57,13 @@
     {/if}
     <span class="status-badge status-{status}">{statusIcon} {status}</span>
   </div>
+  {#if status === 'pending-approval'}
+    <div class="approval-bar">
+      <span class="approval-label">Approve this file write?</span>
+      <button class="approval-approve" on:click={() => onApprove && onApprove()}>Approve</button>
+      <button class="approval-reject"  on:click={() => onReject && onReject()}>Reject</button>
+    </div>
+  {/if}
   {#if expanded}
     <div class="tool-body">
       {#if params !== undefined}
@@ -168,6 +180,46 @@
   .status-running   { color: var(--vscode-charts-blue, #4fc1ff); }
   .status-completed { color: var(--vscode-testing-iconPassed, #89ca78); }
   .status-error     { color: var(--vscode-charts-red, #e06c75); }
+  .status-pending-approval { color: var(--vscode-charts-yellow, #e5c07b); }
+
+  .approval-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 10px;
+    border-top: 1px solid var(--vscode-panel-border, #444);
+    background: var(--vscode-editorWidget-background, #252526);
+  }
+
+  .approval-label {
+    font-size: 11px;
+    flex: 1;
+    color: var(--vscode-foreground, #ccc);
+    opacity: 0.8;
+  }
+
+  .approval-approve {
+    background: var(--vscode-button-background, #0e639c);
+    color: var(--vscode-button-foreground, #fff);
+    border: none;
+    border-radius: 3px;
+    padding: 3px 10px;
+    font-size: 11px;
+    cursor: pointer;
+  }
+  .approval-approve:hover { opacity: 0.9; }
+
+  .approval-reject {
+    background: none;
+    color: var(--vscode-charts-red, #e06c75);
+    border: 1px solid var(--vscode-charts-red, #e06c75);
+    border-radius: 3px;
+    padding: 3px 10px;
+    font-size: 11px;
+    cursor: pointer;
+    opacity: 0.8;
+  }
+  .approval-reject:hover { opacity: 1; }
 
   @keyframes spin {
     from { transform: rotate(0deg); }

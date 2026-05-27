@@ -425,6 +425,21 @@ export class ChatPanel implements vscode.WebviewViewProvider {
         }
       }
 
+      // ── Write-tool permission auto-approve ──────────────────────────────
+      if (event.type === "permission.asked") {
+        const permName = props.permission as string | undefined;
+        const permId   = props.id as string | undefined;
+        if (permId && permName && ChatPanel._isWriteToolName(permName)) {
+          const autoApprove = vscode.workspace
+            .getConfiguration("opencode")
+            .get<boolean>("autoApprove.fileWrites", false);
+          if (autoApprove && this._api) {
+            this._api.permissionReply(permId, "once").catch(() => {/* ignore */});
+            return; // do not broadcast to webview
+          }
+        }
+      }
+
       // ── Write-tool diff injection ────────────────────────────────────────
       if (event.type === "session.next.tool.success") {
         const callID = props.callID as string | undefined;

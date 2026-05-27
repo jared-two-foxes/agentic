@@ -105,6 +105,11 @@
           "type": "string",
           "default": "",
           "description": "Path to the opencode binary. Leave empty to use PATH."
+        },
+        "opencode.autoApprove.fileWrites": {
+          "type": "boolean",
+          "default": false,
+          "description": "Automatically approve file write/edit tool calls without prompting."
         }
       }
     }

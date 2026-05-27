@@ -56,7 +56,7 @@
   type TextPart = { type: 'text'; partID: string; text: string };
   type ReasoningPart = { type: 'reasoning'; partID: string; text: string; done: boolean };
   type SubtaskPart = { type: 'subtask'; childSessionID: string; agentName?: string; parts: TextPart[] };
-  type ToolCallPart = { type: 'tool_call'; partID: string; toolName: string; status: 'pending' | 'running' | 'completed' | 'error'; inputText: string; result?: unknown; diffHunks?: Change[] | null; filePath?: string; originalContent?: string; newContent?: string };
+  type ToolCallPart = { type: 'tool_call'; partID: string; toolName: string; status: 'pending' | 'running' | 'completed' | 'error' | 'pending-approval'; inputText: string; result?: unknown; diffHunks?: Change[] | null; filePath?: string; originalContent?: string; newContent?: string; pendingApprovalID?: string };
   type AssistantPart = TextPart | ReasoningPart | SubtaskPart | ToolCallPart;
   type UserMessage = { kind: 'user'; id: string; serverId?: string; text: string };
   type AssistantMessage = { kind: 'assistant'; id: string; parts: AssistantPart[]; usage?: { input: number; output: number; cost: number } };
@@ -535,6 +535,23 @@
         case 'permission.asked': {
           const props = data.properties as PermissionRequest | undefined;
           if (props && props.id) {
+            if (isWriteTool(props.permission)) {
+              // Route write-tool permissions inline to the matching ToolCallPart
+              const assistantMsg = messages.slice().reverse().find(m => m.kind === 'assistant') as AssistantMessage | undefined;
+              if (assistantMsg) {
+                const tcPart = assistantMsg.parts.slice().reverse().find(
+                  p => p.type === 'tool_call' && isWriteTool((p as ToolCallPart).toolName) && (p as ToolCallPart).status === 'running'
+                ) as ToolCallPart | undefined;
+                if (tcPart) {
+                  tcPart.status = 'pending-approval';
+                  tcPart.pendingApprovalID = props.id;
+                  messages = [...messages];
+                  scrollToBottom();
+                  break;
+                }
+              }
+              // Fallback: no running write tool found — use bottom card
+            }
             pendingPermission = props;
             scrollToBottom();
           }
@@ -543,6 +560,23 @@
         case 'permission.replied':
         case 'permission.rejected': {
           pendingPermission = null;
+          // Also clear any pending-approval ToolCallPart
+          for (const msg of messages) {
+            if (msg.kind !== 'assistant') continue;
+            for (const p of msg.parts) {
+              if (p.type === 'tool_call' && (p as ToolCallPart).status === 'pending-approval') {
+                const tc = p as ToolCallPart;
+                if (data.type === 'permission.replied') {
+                  tc.status = 'running';
+                } else {
+                  tc.status = 'error';
+                  tc.result = 'Rejected by user';
+                }
+                tc.pendingApprovalID = undefined;
+              }
+            }
+          }
+          messages = [...messages];
           break;
         }
         case 'session.idle': {
@@ -901,6 +935,9 @@
                 filePath={part.filePath}
                 originalContent={part.originalContent}
                 newContent={part.newContent}
+                pendingApprovalID={part.pendingApprovalID}
+                onApprove={part.pendingApprovalID ? () => { vscode.postMessage({ type: 'permissionReply', requestID: part.pendingApprovalID, reply: 'once' }); part.status = 'running'; part.pendingApprovalID = undefined; messages = [...messages]; } : undefined}
+                onReject={part.pendingApprovalID ? () => { vscode.postMessage({ type: 'permissionReply', requestID: part.pendingApprovalID, reply: 'reject' }); part.status = 'error'; part.result = 'Rejected by user'; part.pendingApprovalID = undefined; messages = [...messages]; } : undefined}
                 onOpenDiff={(fp, orig, mod) => vscode.postMessage({ type: 'openDiff', filePath: fp, original: orig, modified: mod })}
               />
             {/if}
