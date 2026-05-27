@@ -1,6 +1,7 @@
 import * as vscode from "vscode";
 import * as crypto from "crypto";
 import * as fs from "fs";
+import * as os from "os";
 import * as path from "path";
 import { OpenCodeClient } from "../client/api";
 import type { Agent, Model, CurrentSelection, SessionMessageItem, EventSessionCreated, OpenCodeEvent } from "../client/api";
@@ -438,6 +439,7 @@ export class ChatPanel implements vscode.WebviewViewProvider {
               ...(e.properties ?? {}),
               originalContent: pending.originalContent,
               newContent,
+              filePath: pending.filePath,
             },
           };
           this._broadcast(enriched as unknown as OpenCodeEvent);
@@ -554,7 +556,7 @@ export class ChatPanel implements vscode.WebviewViewProvider {
 
   private async _handleMessage(
     webview: vscode.Webview,
-    msg: { type: string; text?: string; requestID?: string; answers?: unknown; reply?: string; message?: string; sessionId?: string; title?: string; editMessageId?: string }
+    msg: { type: string; text?: string; requestID?: string; answers?: unknown; reply?: string; message?: string; sessionId?: string; title?: string; editMessageId?: string; filePath?: string; original?: string; modified?: string }
   ): Promise<void> {
     const port: number = vscode.workspace.getConfiguration("opencode").get("port") ?? 4096;
 
@@ -807,6 +809,23 @@ export class ChatPanel implements vscode.WebviewViewProvider {
 
     if (msg.type === "openSettings") {
       vscode.commands.executeCommand("workbench.action.openSettings", "opencode");
+      return;
+    }
+
+    if (msg.type === "openDiff") {
+      if (!msg.filePath || msg.original === undefined) return;
+      const filename = path.basename(msg.filePath);
+      const tmpPath = path.join(os.tmpdir(), `opencode-diff-${Date.now()}-${filename}`);
+      fs.writeFileSync(tmpPath, msg.original, "utf8");
+      const tmpUri = vscode.Uri.file(tmpPath);
+      const actualUri = vscode.Uri.file(msg.filePath);
+      vscode.commands.executeCommand("vscode.diff", tmpUri, actualUri, `Before ↔ After: ${filename}`);
+      const disposable = vscode.workspace.onDidCloseTextDocument((doc) => {
+        if (doc.uri.fsPath === tmpPath) {
+          try { fs.unlinkSync(tmpPath); } catch { /* ignore */ }
+          disposable.dispose();
+        }
+      });
       return;
     }
 

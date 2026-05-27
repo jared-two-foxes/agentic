@@ -9,6 +9,10 @@
   export let params: unknown = undefined;
   export let result: unknown = undefined;
   export let diffHunks: Change[] | null = null;
+  export let filePath: string | undefined = undefined;
+  export let originalContent: string | undefined = undefined;
+  export let newContent: string | undefined = undefined;
+  export let onOpenDiff: ((filePath: string, original: string, modified: string) => void) | undefined = undefined;
 
   $: meta = getToolMeta(toolName);
 
@@ -58,7 +62,14 @@
       {/if}
       {#if diffHunks !== null && diffHunks.length > 0 && isWriteTool(toolName)}
         <div class="tool-section">
-          <div class="tool-section-label">Diff</div>
+          <div class="tool-section-header">
+            <div class="tool-section-label">Diff</div>
+            {#if filePath && originalContent !== undefined && newContent !== undefined && onOpenDiff}
+              <button class="open-diff-btn" on:click={() => onOpenDiff(filePath, originalContent, newContent)} title="Open in diff editor">
+                🔀 Open diff
+              </button>
+            {/if}
+          </div>
           <DiffBlock hunks={diffHunks} />
         </div>
       {/if}
@@ -174,13 +185,32 @@
 
   .tool-section { margin-bottom: 8px; }
 
+  .tool-section-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 4px;
+  }
+
   .tool-section-label {
     font-size: 10px;
     text-transform: uppercase;
     letter-spacing: 0.05em;
     opacity: 0.5;
-    margin-bottom: 4px;
   }
+
+  .open-diff-btn {
+    background: none;
+    border: 1px solid var(--vscode-panel-border, #555);
+    color: var(--vscode-textLink-foreground, #4fc1ff);
+    font-size: 10px;
+    cursor: pointer;
+    padding: 1px 6px;
+    border-radius: 3px;
+    opacity: 0.8;
+    line-height: 1.4;
+  }
+  .open-diff-btn:hover { opacity: 1; background: var(--vscode-list-hoverBackground, rgba(255,255,255,0.05)); }
 
   .tool-pre {
     margin: 0;
