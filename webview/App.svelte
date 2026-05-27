@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, afterUpdate } from 'svelte';
   import { marked, Renderer } from 'marked';
+  import Header from './Header.svelte';
   import DOMPurify from 'dompurify';
 
   // Configure marked: enable GitHub-flavoured markdown, disable mangling of emails
@@ -370,6 +371,9 @@
     historyCursor = historyStack.length;
     historySaved = '';
     inputText = '';
+    requestAnimationFrame(() => {
+      if (chatInputEl) resizeTextarea(chatInputEl);
+    });
   }
 
   function handleKeydown(e: KeyboardEvent) {
@@ -419,6 +423,15 @@
         textarea.setSelectionRange(textarea.value.length, textarea.value.length);
       });
     }
+  }
+
+  function resizeTextarea(el: HTMLTextAreaElement): void {
+    el.style.height = 'auto';
+    el.style.height = el.scrollHeight + 'px';
+  }
+
+  function handleInput(e: Event): void {
+    resizeTextarea(e.currentTarget as HTMLTextAreaElement);
   }
 
   onMount(() => {
@@ -668,8 +681,15 @@
 
 <div class="chat-container">
   {#if isContextLoaded}
+  <Header
+    modelLabel={currentModelName ?? currentModelId ?? ''}
+    onModelClick={() => vscode.postMessage({ type: 'pickModel' })}
+    onHistoryClick={toggleSessionPanel}
+    onSettingsClick={() => vscode.postMessage({ type: 'openSettings' })}
+    onNewSessionClick={() => vscode.postMessage({ type: 'newSession' })}
+  />
   <!-- Context bar -->
-  {#if agents.length > 0 || models.length > 0 || contextError || true}
+  {#if contextError || currentAgent !== undefined || agents.length > 0 || showVariantChip}
     <div class="context-bar">
       {#if contextError}
         <span class="context-error">{contextError}
@@ -682,12 +702,6 @@
             <span class="chip-label">{currentAgent ?? '—'}</span>
           </button>
         {/if}
-        {#if currentModelId !== undefined || models.length > 0}
-          <button class="context-chip" on:click={() => vscode.postMessage({ type: 'pickModel' })} title="Select model">
-            <span class="chip-icon">⬡</span>
-            <span class="chip-label">{currentModelName ?? currentModelId ?? '—'}</span>
-          </button>
-        {/if}
         {#if showVariantChip}
           <button class="context-chip" on:click={() => vscode.postMessage({ type: 'pickVariant' })} title="Select variant">
             <span class="chip-icon">◇</span>
@@ -695,15 +709,6 @@
           </button>
         {/if}
       {/if}
-      <!-- Session picker button (always visible in context bar) -->
-      <button class="context-chip session-chip" on:click={toggleSessionPanel} title="Sessions" class:active={showSessionPanel}>
-        <span class="chip-icon">⊞</span>
-        <span class="chip-label">{currentSessionTitle ?? 'Sessions'}</span>
-      </button>
-      <!-- New session button -->
-      <button class="context-chip new-session-btn" on:click={() => vscode.postMessage({ type: 'newSession' })} title="New session">
-        <span class="chip-icon">+</span>
-      </button>
     </div>
   {/if}
 
@@ -892,6 +897,7 @@
       bind:value={inputText}
       bind:this={chatInputEl}
       on:keydown={handleKeydown}
+      on:input={handleInput}
       rows="1"
       disabled={!!pendingQuestion || !!pendingPermission}
     ></textarea>
@@ -1504,22 +1510,6 @@
   .chat-input:disabled {
     opacity: 0.4;
     cursor: not-allowed;
-  }
-
-  /* ── Session chip ─────────────────────────────────────────────────────── */
-  .session-chip {
-    margin-left: auto; /* push to the right end of the context bar */
-  }
-  .session-chip.active {
-    background: var(--vscode-button-background);
-    color: var(--vscode-button-foreground);
-  }
-
-  .new-session-btn {
-    flex-shrink: 0;
-    font-weight: 700;
-    font-size: 14px;
-    padding: 1px 6px;
   }
 
   /* ── Session overlay ──────────────────────────────────────────────────── */
