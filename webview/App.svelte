@@ -1,14 +1,50 @@
 <script lang="ts">
   import { onMount, afterUpdate } from 'svelte';
-  import { marked } from 'marked';
+  import { marked, Renderer } from 'marked';
   import DOMPurify from 'dompurify';
 
   // Configure marked: enable GitHub-flavoured markdown, disable mangling of emails
   marked.setOptions({ gfm: true, breaks: false });
 
-  function renderMarkdown(text: string): string {
-    return DOMPurify.sanitize(marked.parse(text) as string);
+  // ── Shiki syntax highlighting ─────────────────────────────────────────────
+  let highlighter: { codeToHtml(code: string, opts: { lang: string; theme: string }): string } | null = null;
+
+  const SHIKI_LANGS = ['typescript', 'javascript', 'python', 'json', 'bash', 'markdown', 'css', 'html'] as const;
+
+  function getVscodeTheme(): string {
+    const kind = document.body.getAttribute('data-vscode-theme-kind') ?? '';
+    if (kind === 'vscode-dark' || kind === 'vscode-high-contrast') return 'dark-plus';
+    if (kind === 'vscode-light' || kind === 'vscode-high-contrast-light') return 'light-plus';
+    return 'dark-plus';
   }
+
+  // Custom marked renderer — reads `highlighter` at call time (closure over module var)
+  const _renderer = new Renderer();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (_renderer as any).code = ({ text, lang }: { text: string; lang?: string }) => {
+    const rawCode = text;
+    const escapedCode = rawCode.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const encodedCode = encodeURIComponent(rawCode);
+    const copyBtn = `<button class="copy-btn" data-code="${encodedCode}" title="Copy code">Copy</button>`;
+    if (highlighter && lang && (SHIKI_LANGS as readonly string[]).includes(lang)) {
+      try {
+        const highlighted = highlighter.codeToHtml(rawCode, { lang, theme: getVscodeTheme() });
+        return `<div class="code-block-wrap">${highlighted}${copyBtn}</div>`;
+      } catch (_e) {
+        // fall through to plain
+      }
+    }
+    const safeLang = lang ? lang.replace(/[^a-zA-Z0-9-_]/g, '') : '';
+    return `<div class="code-block-wrap"><pre><code class="language-${safeLang}">${escapedCode}</code></pre>${copyBtn}</div>`;
+  };
+  marked.use({ renderer: _renderer });
+
+  // Reactive renderMarkdown — re-evaluated when highlighter loads so existing blocks re-render
+  $: renderMarkdown = (text: string): string => {
+    // Reference highlighter so Svelte re-runs this when it changes
+    void highlighter;
+    return DOMPurify.sanitize(marked.parse(text) as string, { ADD_ATTR: ['data-code'] });
+  };
 
   // Types
   type TextPart = { type: 'text'; partID: string; text: string };
@@ -591,8 +627,38 @@
 
     window.addEventListener('message', handler);
     vscode.postMessage({ type: 'getStatus' });
-    // Return cleanup so Svelte removes the listener when the component is destroyed
-    return () => window.removeEventListener('message', handler);
+
+    // Delegated click handler for copy buttons (event delegation — one listener for all blocks)
+    function onCopyClick(e: MouseEvent) {
+      const target = e.target as HTMLElement;
+      if (!target.classList.contains('copy-btn')) return;
+      const encoded = target.dataset.code ?? '';
+      const code = decodeURIComponent(encoded);
+      navigator.clipboard.writeText(code).then(() => {
+        const prev = target.textContent;
+        target.textContent = 'Copied!';
+        setTimeout(() => { target.textContent = prev; }, 1500);
+      }).catch(() => {});
+    }
+    messageListEl.addEventListener('click', onCopyClick);
+
+    // Lazy-load shiki (non-blocking)
+    import('shiki').then(({ createHighlighter }) => {
+      return createHighlighter({
+        langs: [...SHIKI_LANGS],
+        themes: ['dark-plus', 'light-plus'],
+      });
+    }).then((hl) => {
+      highlighter = hl;
+    }).catch(() => {
+      // shiki failed to load — plain code blocks remain
+    });
+
+    // Return cleanup
+    return () => {
+      window.removeEventListener('message', handler);
+      messageListEl?.removeEventListener('click', onCopyClick);
+    };
   });
 
   afterUpdate(() => {
@@ -1752,5 +1818,54 @@
   .subtask-text {
     white-space: pre-wrap;
     opacity: 0.85;
+  }
+
+  /* ── Shiki code blocks & copy button ─────────────────────────────────── */
+  :global(.code-block-wrap) {
+    position: relative;
+    margin: 0 0 0.6em;
+  }
+
+  :global(.code-block-wrap pre) {
+    margin: 0 !important;
+    border-radius: 5px;
+    overflow-x: auto;
+    padding: 10px 12px !important;
+    font-family: var(--vscode-editor-font-family, monospace) !important;
+    font-size: 0.88em;
+    line-height: 1.5;
+  }
+
+  :global(.code-block-wrap pre code) {
+    background: none !important;
+    padding: 0 !important;
+    font-size: inherit;
+    line-height: inherit;
+    font-family: inherit;
+  }
+
+  :global(.code-block-wrap .shiki) {
+    background: var(--vscode-textCodeBlock-background, rgba(128,128,128,0.15)) !important;
+  }
+
+  :global(.copy-btn) {
+    position: absolute;
+    top: 6px;
+    right: 6px;
+    padding: 2px 8px;
+    font-size: 11px;
+    border: 1px solid var(--vscode-panel-border, #555);
+    background: var(--vscode-editor-background);
+    color: var(--vscode-foreground);
+    border-radius: 3px;
+    cursor: pointer;
+    opacity: 0;
+    transition: opacity 0.15s;
+    z-index: 1;
+    line-height: 1.4;
+  }
+
+  :global(.code-block-wrap:hover .copy-btn) {
+    opacity: 1;
   }
 </style>

@@ -9,4 +9,7 @@ export default defineConfig({
     outDir: "../dist/webview",
     emptyOutDir: false,
   },
+  optimizeDeps: {
+    exclude: ['shiki'],
+  },
 });
