@@ -6,6 +6,7 @@
   import Header from './Header.svelte';
   import HistoryPanel from './HistoryPanel.svelte';
   import ToolCallCard from './ToolCallCard.svelte';
+  import ContextLimitCard from './ContextLimitCard.svelte';
   import DOMPurify from 'dompurify';
   import { isWriteTool, isCommandTool } from './toolMeta';
 
@@ -417,6 +418,16 @@
     messages = messages.slice(0, idx);
     isThinking = true;
     vscode.postMessage({ type: 'send', text });
+  }
+
+  function isContextLimitError(message: string): boolean {
+    return /context.length.exceeded|context length|too long|maximum context/i.test(message);
+  }
+
+  function handleNewTask() {
+    // newSession is the correct IPC type handled by ChatPanel.ts;
+    // skip the confirmation dialog since the user is already in a broken context-limit state
+    vscode.postMessage({ type: 'newSession' });
   }
 
   function handleKeydown(e: KeyboardEvent) {
@@ -991,18 +1002,22 @@
             <div class="usage-line">↓ {msg.usage.input.toLocaleString()} · ↑ {msg.usage.output.toLocaleString()}{msg.usage.cost > 0 ? ` · $${msg.usage.cost.toPrecision(4)}` : ''}</div>
           {/if}
           {#if msg.error}
-            <div class="msg-error-banner">
-              <span class="msg-error-text">
-                {#if msg.error.kind === 'network'}
-                  Connection lost — check that opencode is running
-                {:else if msg.error.kind === 'model'}
-                  {msg.error.message}
-                {:else}
-                  Something went wrong
-                {/if}
-              </span>
-              <button class="msg-error-retry" on:click={() => handleRetry(msg)}>↩ Retry</button>
-            </div>
+            {#if isContextLimitError(msg.error.message ?? '')}
+              <ContextLimitCard onNewTask={handleNewTask} />
+            {:else}
+              <div class="msg-error-banner">
+                <span class="msg-error-text">
+                  {#if msg.error.kind === 'network'}
+                    Connection lost — check that opencode is running
+                  {:else if msg.error.kind === 'model'}
+                    {msg.error.message}
+                  {:else}
+                    Something went wrong
+                  {/if}
+                </span>
+                <button class="msg-error-retry" on:click={() => handleRetry(msg)}>↩ Retry</button>
+              </div>
+            {/if}
           {/if}
         </div>
       {:else if msg.kind === 'error'}
