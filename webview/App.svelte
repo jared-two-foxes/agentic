@@ -52,7 +52,8 @@
   type TextPart = { type: 'text'; partID: string; text: string };
   type ReasoningPart = { type: 'reasoning'; partID: string; text: string; done: boolean };
   type SubtaskPart = { type: 'subtask'; childSessionID: string; agentName?: string; parts: TextPart[] };
-  type AssistantPart = TextPart | ReasoningPart | SubtaskPart;
+  type ToolCallPart = { type: 'tool_call'; partID: string; toolName: string; status: 'pending' | 'running' | 'completed' | 'error'; inputText: string; result?: unknown };
+  type AssistantPart = TextPart | ReasoningPart | SubtaskPart | ToolCallPart;
   type UserMessage = { kind: 'user'; id: string; serverId?: string; text: string };
   type AssistantMessage = { kind: 'assistant'; id: string; parts: AssistantPart[]; usage?: { input: number; output: number; cost: number } };
   type ErrorMessage = { kind: 'error'; id: string; text: string };
@@ -232,6 +233,38 @@
     }
     messages = [...messages];
     scrollToBottom();
+  }
+
+  /** Get an existing ToolCallPart by callID, or create one and append it to the current assistant message */
+  function getOrCreateToolCallPart(callID: string, toolName?: string): ToolCallPart {
+    const assistantMsg = getOrCreateAssistantMessage();
+    const existing = assistantMsg.parts.find(
+      p => p.type === 'tool_call' && (p as ToolCallPart).partID === callID
+    ) as ToolCallPart | undefined;
+    if (existing) {
+      if (toolName) existing.toolName = toolName;
+      return existing;
+    }
+    const part: ToolCallPart = { type: 'tool_call', partID: callID, toolName: toolName ?? '', status: 'pending', inputText: '' };
+    assistantMsg.parts = [...assistantMsg.parts, part];
+    messages = [...messages];
+    return part;
+  }
+
+  function tryParseJSON(s: string): unknown {
+    try { return JSON.parse(s); } catch { return s; }
+  }
+
+  function getToolSummary(toolName: string, inputText: string): string {
+    try {
+      const inp = JSON.parse(inputText) as Record<string, unknown>;
+      for (const key of ['filePath', 'path', 'command', 'pattern', 'query', 'url']) {
+        if (typeof inp[key] === 'string') return (inp[key] as string).slice(0, 80);
+      }
+      const keys = Object.keys(inp);
+      if (keys.length > 0) return JSON.stringify(inp[keys[0]]).slice(0, 80);
+    } catch { /* no-op */ }
+    return toolName;
   }
 
   // ── Session management helpers ───────────────────────────────────────────
@@ -671,6 +704,70 @@
           }
           break;
         }
+        case 'session.next.tool.input.started': {
+          const props = data.properties ?? {};
+          const callID = props.callID as string | undefined;
+          const toolName = props.name as string | undefined;
+          if (!callID) break;
+          getOrCreateToolCallPart(callID, toolName);
+          scrollToBottom();
+          break;
+        }
+        case 'session.next.tool.input.delta': {
+          const props = data.properties ?? {};
+          const callID = props.callID as string | undefined;
+          const delta = props.delta as string | undefined;
+          if (!callID || !delta) break;
+          const tcPart = getOrCreateToolCallPart(callID);
+          tcPart.inputText += delta;
+          messages = messages;
+          break;
+        }
+        case 'session.next.tool.input.ended': {
+          const props = data.properties ?? {};
+          const callID = props.callID as string | undefined;
+          const text = props.text as string | undefined;
+          if (!callID || text === undefined) break;
+          const tcPart = getOrCreateToolCallPart(callID);
+          tcPart.inputText = text;
+          messages = messages;
+          break;
+        }
+        case 'session.next.tool.called': {
+          const props = data.properties ?? {};
+          const callID = props.callID as string | undefined;
+          const toolName = props.tool as string | undefined;
+          if (!callID) break;
+          const tcPart = getOrCreateToolCallPart(callID, toolName);
+          tcPart.status = 'running';
+          messages = messages;
+          scrollToBottom();
+          break;
+        }
+        case 'session.next.tool.success': {
+          const props = data.properties ?? {};
+          const callID = props.callID as string | undefined;
+          const content = props.content as Array<{ type: string; text?: string }> | undefined;
+          if (!callID) break;
+          const tcPart = getOrCreateToolCallPart(callID);
+          tcPart.status = 'completed';
+          if (Array.isArray(content)) {
+            tcPart.result = content.filter(c => c.type === 'text').map(c => c.text ?? '').join('\n');
+          }
+          messages = messages;
+          break;
+        }
+        case 'session.next.tool.failed': {
+          const props = data.properties ?? {};
+          const callID = props.callID as string | undefined;
+          const error = props.error as { message?: string } | string | undefined;
+          if (!callID) break;
+          const tcPart = getOrCreateToolCallPart(callID);
+          tcPart.status = 'error';
+          tcPart.result = typeof error === 'string' ? error : (error?.message ?? 'Tool failed');
+          messages = messages;
+          break;
+        }
         default:
           // unknown message type — ignore
           break;
@@ -835,6 +932,14 @@
                   {/each}
                 </div>
               </div>
+            {:else if part.type === 'tool_call'}
+              <ToolCallCard
+                toolName={part.toolName}
+                summary={getToolSummary(part.toolName, part.inputText)}
+                status={part.status}
+                params={part.inputText ? tryParseJSON(part.inputText) : undefined}
+                result={part.result}
+              />
             {/if}
           {/each}
           {#if msg.usage}
