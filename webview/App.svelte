@@ -59,7 +59,7 @@
   type ToolCallPart = { type: 'tool_call'; partID: string; toolName: string; status: 'pending' | 'running' | 'completed' | 'error' | 'pending-approval'; inputText: string; result?: unknown; diffHunks?: Change[] | null; filePath?: string; originalContent?: string; newContent?: string; pendingApprovalID?: string; commandString?: string };
   type AssistantPart = TextPart | ReasoningPart | SubtaskPart | ToolCallPart;
   type UserMessage = { kind: 'user'; id: string; serverId?: string; text: string };
-  type AssistantMessage = { kind: 'assistant'; id: string; parts: AssistantPart[]; usage?: { input: number; output: number; cost: number } };
+  type AssistantMessage = { kind: 'assistant'; id: string; parts: AssistantPart[]; usage?: { input: number; output: number; cost: number }; error?: { kind: 'network' | 'model' | 'unknown'; message: string } | null };
   type ErrorMessage = { kind: 'error'; id: string; text: string };
   type Message = UserMessage | AssistantMessage | ErrorMessage;
 
@@ -408,6 +408,17 @@
     });
   }
 
+  function handleRetry(failedMsg: AssistantMessage) {
+    const idx = messages.findIndex(m => m.id === failedMsg.id);
+    if (idx < 1) return;
+    const preceding = messages[idx - 1];
+    if (preceding.kind !== 'user') return;
+    const text = preceding.text;
+    messages = messages.slice(0, idx);
+    isThinking = true;
+    vscode.postMessage({ type: 'send', text });
+  }
+
   function handleKeydown(e: KeyboardEvent) {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
@@ -479,7 +490,14 @@
           }
           statusMessage = typeof data.message === 'string' ? data.message : '';
           if (val === 'error' && isContextLoaded) {
-            messages = [...messages, { kind: 'error', id: nextId(), text: statusMessage || 'An error occurred' }];
+            isThinking = false;
+            const lastAsst = [...messages].reverse().find(m => m.kind === 'assistant') as AssistantMessage | undefined;
+            if (lastAsst) {
+              lastAsst.error = { kind: 'network', message: statusMessage || 'Connection lost' };
+              messages = [...messages];
+            } else {
+              messages = [...messages, { kind: 'error', id: nextId(), text: statusMessage || 'An error occurred' }];
+            }
           }
           scrollToBottom();
           break;
@@ -510,7 +528,13 @@
             status = 'error';
             const errText = st.error ? String(st.error) : 'Session error';
             statusMessage = errText;
-            messages = [...messages, { kind: 'error', id: nextId(), text: errText }];
+            const lastAsst = [...messages].reverse().find(m => m.kind === 'assistant') as AssistantMessage | undefined;
+            if (lastAsst) {
+              lastAsst.error = { kind: 'model', message: errText };
+              messages = [...messages];
+            } else {
+              messages = [...messages, { kind: 'error', id: nextId(), text: errText }];
+            }
             scrollToBottom();
           }
           break;
@@ -965,6 +989,20 @@
           {/each}
           {#if msg.usage}
             <div class="usage-line">↓ {msg.usage.input.toLocaleString()} · ↑ {msg.usage.output.toLocaleString()}{msg.usage.cost > 0 ? ` · $${msg.usage.cost.toPrecision(4)}` : ''}</div>
+          {/if}
+          {#if msg.error}
+            <div class="msg-error-banner">
+              <span class="msg-error-text">
+                {#if msg.error.kind === 'network'}
+                  Connection lost — check that opencode is running
+                {:else if msg.error.kind === 'model'}
+                  {msg.error.message}
+                {:else}
+                  Something went wrong
+                {/if}
+              </span>
+              <button class="msg-error-retry" on:click={() => handleRetry(msg)}>↩ Retry</button>
+            </div>
           {/if}
         </div>
       {:else if msg.kind === 'error'}
@@ -1931,5 +1969,36 @@
 
   :global(.code-block-wrap:hover .copy-btn) {
     opacity: 1;
+  }
+
+  /* ── Per-message error banner ─────────────────────────────────────────── */
+  .msg-error-banner {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 8px;
+    padding: 6px 10px;
+    background: var(--vscode-inputValidation-errorBackground, rgba(244, 71, 71, 0.1));
+    border-left: 3px solid var(--vscode-editorError-foreground, #f44747);
+    border-radius: 0 4px 4px 0;
+    font-size: 0.85em;
+  }
+  .msg-error-text {
+    flex: 1;
+    color: var(--vscode-editorError-foreground, #f44747);
+  }
+  .msg-error-retry {
+    background: none;
+    border: 1px solid var(--vscode-editorError-foreground, #f44747);
+    color: var(--vscode-editorError-foreground, #f44747);
+    border-radius: 3px;
+    padding: 2px 8px;
+    cursor: pointer;
+    font-size: 0.8em;
+    white-space: nowrap;
+  }
+  .msg-error-retry:hover {
+    background: var(--vscode-editorError-foreground, #f44747);
+    color: var(--vscode-editor-background, #1e1e1e);
   }
 </style>
