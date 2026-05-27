@@ -2,6 +2,7 @@
   import { onMount, afterUpdate } from 'svelte';
   import { marked, Renderer } from 'marked';
   import Header from './Header.svelte';
+  import ToolCallCard from './ToolCallCard.svelte';
   import DOMPurify from 'dompurify';
 
   // Configure marked: enable GitHub-flavoured markdown, disable mangling of emails
