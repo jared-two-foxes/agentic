@@ -16,8 +16,11 @@
   export let pendingApprovalID: string | undefined = undefined;
   export let onApprove: (() => void) | undefined = undefined;
   export let onReject: (() => void) | undefined = undefined;
+  export let commandString: string | undefined = undefined;
 
   $: meta = getToolMeta(toolName);
+
+  $: isDestructive = commandString ? /\brm\b|\bdel\b|\bformat\b|\bdrop\b|\btruncate\b|>/.test(commandString) : false;
 
   $: borderColor =
     status === 'running'           ? 'var(--vscode-charts-blue, #4fc1ff)' :
@@ -59,7 +62,13 @@
   </div>
   {#if status === 'pending-approval'}
     <div class="approval-bar">
-      <span class="approval-label">Approve this file write?</span>
+      {#if commandString}
+        <pre class="command-preview">{commandString}</pre>
+        {#if isDestructive}
+          <div class="destructive-warning">⚠️ This command may be destructive</div>
+        {/if}
+      {/if}
+      <span class="approval-label">{commandString ? 'Run this command?' : 'Approve this file write?'}</span>
       <button class="approval-approve" on:click={() => onApprove && onApprove()}>Approve</button>
       <button class="approval-reject"  on:click={() => onReject && onReject()}>Reject</button>
     </div>
@@ -185,6 +194,7 @@
   .approval-bar {
     display: flex;
     align-items: center;
+    flex-wrap: wrap;
     gap: 8px;
     padding: 6px 10px;
     border-top: 1px solid var(--vscode-panel-border, #444);
@@ -220,6 +230,28 @@
     opacity: 0.8;
   }
   .approval-reject:hover { opacity: 1; }
+
+  .command-preview {
+    font-family: var(--vscode-editor-font-family, monospace);
+    font-size: 0.85em;
+    background: var(--vscode-textCodeBlock-background, rgba(0,0,0,0.2));
+    border-radius: 4px;
+    padding: 6px 8px;
+    margin: 4px 0 6px;
+    white-space: pre-wrap;
+    word-break: break-all;
+    max-height: 120px;
+    overflow-y: auto;
+    width: 100%;
+    box-sizing: border-box;
+  }
+
+  .destructive-warning {
+    color: var(--vscode-errorForeground, #f44747);
+    font-size: 0.8em;
+    margin-bottom: 6px;
+    width: 100%;
+  }
 
   @keyframes spin {
     from { transform: rotate(0deg); }

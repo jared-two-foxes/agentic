@@ -110,6 +110,11 @@
           "type": "boolean",
           "default": false,
           "description": "Automatically approve file write/edit tool calls without prompting."
+        },
+        "opencode.autoApprove.commands": {
+          "type": "boolean",
+          "default": false,
+          "description": "Automatically approve shell command tool calls (bash) without prompting."
         }
       }
     }

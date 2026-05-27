@@ -349,6 +349,11 @@ export class ChatPanel implements vscode.WebviewViewProvider {
     return name === 'write' || name === 'Write' || name === 'edit' || name === 'Edit';
   }
 
+  /** Returns true for tool names that execute shell commands. */
+  private static _isCommandToolName(name: string): boolean {
+    return name === 'bash' || name === 'Bash';
+  }
+
   /** Returns an event handler for a parent session that detects child session spawns,
    *  subscribes to their SSE streams, and broadcasts all events to the webview. */
   private _makeParentEventHandler(
@@ -433,6 +438,15 @@ export class ChatPanel implements vscode.WebviewViewProvider {
           const autoApprove = vscode.workspace
             .getConfiguration("opencode")
             .get<boolean>("autoApprove.fileWrites", false);
+          if (autoApprove && this._api) {
+            this._api.permissionReply(permId, "once").catch(() => {/* ignore */});
+            return; // do not broadcast to webview
+          }
+        }
+        if (permId && permName && ChatPanel._isCommandToolName(permName)) {
+          const autoApprove = vscode.workspace
+            .getConfiguration("opencode")
+            .get<boolean>("autoApprove.commands", false);
           if (autoApprove && this._api) {
             this._api.permissionReply(permId, "once").catch(() => {/* ignore */});
             return; // do not broadcast to webview

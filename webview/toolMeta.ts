@@ -37,3 +37,9 @@ const WRITE_TOOL_NAMES = new Set(['write', 'Write', 'edit', 'Edit']);
 export function isWriteTool(toolName: string): boolean {
   return WRITE_TOOL_NAMES.has(toolName);
 }
+
+/** Returns true if the tool is a shell command execution tool. */
+const COMMAND_TOOL_NAMES = new Set(['bash', 'Bash']);
+export function isCommandTool(toolName: string): boolean {
+  return COMMAND_TOOL_NAMES.has(toolName);
+}

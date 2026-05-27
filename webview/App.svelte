@@ -7,7 +7,7 @@
   import HistoryPanel from './HistoryPanel.svelte';
   import ToolCallCard from './ToolCallCard.svelte';
   import DOMPurify from 'dompurify';
-  import { isWriteTool } from './toolMeta';
+  import { isWriteTool, isCommandTool } from './toolMeta';
 
   // Configure marked: enable GitHub-flavoured markdown, disable mangling of emails
   marked.setOptions({ gfm: true, breaks: false });
@@ -56,7 +56,7 @@
   type TextPart = { type: 'text'; partID: string; text: string };
   type ReasoningPart = { type: 'reasoning'; partID: string; text: string; done: boolean };
   type SubtaskPart = { type: 'subtask'; childSessionID: string; agentName?: string; parts: TextPart[] };
-  type ToolCallPart = { type: 'tool_call'; partID: string; toolName: string; status: 'pending' | 'running' | 'completed' | 'error' | 'pending-approval'; inputText: string; result?: unknown; diffHunks?: Change[] | null; filePath?: string; originalContent?: string; newContent?: string; pendingApprovalID?: string };
+  type ToolCallPart = { type: 'tool_call'; partID: string; toolName: string; status: 'pending' | 'running' | 'completed' | 'error' | 'pending-approval'; inputText: string; result?: unknown; diffHunks?: Change[] | null; filePath?: string; originalContent?: string; newContent?: string; pendingApprovalID?: string; commandString?: string };
   type AssistantPart = TextPart | ReasoningPart | SubtaskPart | ToolCallPart;
   type UserMessage = { kind: 'user'; id: string; serverId?: string; text: string };
   type AssistantMessage = { kind: 'assistant'; id: string; parts: AssistantPart[]; usage?: { input: number; output: number; cost: number } };
@@ -551,6 +551,25 @@
                 }
               }
               // Fallback: no running write tool found — use bottom card
+            } else if (isCommandTool(props.permission)) {
+              const assistantMsg = messages.slice().reverse().find(m => m.kind === 'assistant') as AssistantMessage | undefined;
+              if (assistantMsg) {
+                const tcPart = assistantMsg.parts.slice().reverse().find(
+                  p => p.type === 'tool_call' && isCommandTool((p as ToolCallPart).toolName) && (p as ToolCallPart).status === 'running'
+                ) as ToolCallPart | undefined;
+                if (tcPart) {
+                  tcPart.status = 'pending-approval';
+                  tcPart.pendingApprovalID = props.id;
+                  // Extract command string from inputText JSON
+                  try {
+                    const parsed = JSON.parse(tcPart.inputText) as Record<string, unknown>;
+                    tcPart.commandString = typeof parsed.command === 'string' ? parsed.command : undefined;
+                  } catch { /* ignore */ }
+                  messages = [...messages];
+                  scrollToBottom();
+                  break;
+                }
+              }
             }
             pendingPermission = props;
             scrollToBottom();
@@ -936,6 +955,7 @@
                 originalContent={part.originalContent}
                 newContent={part.newContent}
                 pendingApprovalID={part.pendingApprovalID}
+                commandString={part.commandString}
                 onApprove={part.pendingApprovalID ? () => { vscode.postMessage({ type: 'permissionReply', requestID: part.pendingApprovalID, reply: 'once' }); part.status = 'running'; part.pendingApprovalID = undefined; messages = [...messages]; } : undefined}
                 onReject={part.pendingApprovalID ? () => { vscode.postMessage({ type: 'permissionReply', requestID: part.pendingApprovalID, reply: 'reject' }); part.status = 'error'; part.result = 'Rejected by user'; part.pendingApprovalID = undefined; messages = [...messages]; } : undefined}
                 onOpenDiff={(fp, orig, mod) => vscode.postMessage({ type: 'openDiff', filePath: fp, original: orig, modified: mod })}
