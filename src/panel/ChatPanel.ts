@@ -343,13 +343,58 @@ export class ChatPanel implements vscode.WebviewViewProvider {
     this._childUnsubscribes.clear();
   }
 
+  /** Returns true for tool names that write or modify files — used to gate diff injection. */
+  private static _isWriteToolName(name: string): boolean {
+    return name === 'write' || name === 'Write' || name === 'edit' || name === 'Edit';
+  }
+
   /** Returns an event handler for a parent session that detects child session spawns,
    *  subscribes to their SSE streams, and broadcasts all events to the webview. */
   private _makeParentEventHandler(
     _sessionId: string,
     apiClient: OpenCodeClient
   ): (event: OpenCodeEvent) => void {
+    /** Tracks pending write-tool calls so we can read original + new file content for diff. */
+    type PendingWriteTool = { toolName: string; filePath?: string; originalContent?: string };
+    const pendingWriteTools = new Map<string, PendingWriteTool>();
+
     return (event) => {
+      // Helper: cast to the catch-all event shape for property access
+      const e = event as { type: string; id: string; properties?: Record<string, unknown> };
+      const props = e.properties ?? {};
+
+      // ── Write-tool diff tracking ─────────────────────────────────────────
+      if (event.type === "session.next.tool.input.started") {
+        const callID = props.callID as string | undefined;
+        const toolName = props.name as string | undefined;
+        if (callID && toolName) {
+          // Track all tool calls so we can associate names with later events
+          pendingWriteTools.set(callID, { toolName });
+        }
+      }
+
+      if (event.type === "session.next.tool.input.ended") {
+        const callID = props.callID as string | undefined;
+        const text = props.text as string | undefined;
+        const pending = callID ? pendingWriteTools.get(callID) : undefined;
+        if (pending && ChatPanel._isWriteToolName(pending.toolName) && text) {
+          try {
+            const input = JSON.parse(text) as Record<string, unknown>;
+            for (const key of ["filePath", "path"] as const) {
+              if (typeof input[key] === "string") {
+                const fp = input[key] as string;
+                let originalContent = "";
+                try { originalContent = fs.readFileSync(fp, "utf8"); } catch { /* new file */ }
+                pending.filePath = fp;
+                pending.originalContent = originalContent;
+                break;
+              }
+            }
+          } catch { /* JSON parse failed — no diff */ }
+        }
+      }
+
+      // ── Child session detection ──────────────────────────────────────────
       if (event.type === "session.created") {
         const created = event as EventSessionCreated;
         const childId = created.properties?.sessionID;
@@ -378,6 +423,28 @@ export class ChatPanel implements vscode.WebviewViewProvider {
           this._childUnsubscribes.set(childId, childUnsub);
         }
       }
+
+      // ── Write-tool diff injection ────────────────────────────────────────
+      if (event.type === "session.next.tool.success") {
+        const callID = props.callID as string | undefined;
+        const pending = callID ? pendingWriteTools.get(callID) : undefined;
+        if (callID) pendingWriteTools.delete(callID);
+        if (pending && pending.filePath !== undefined && pending.originalContent !== undefined) {
+          let newContent = "";
+          try { newContent = fs.readFileSync(pending.filePath, "utf8"); } catch { /* file may have been deleted */ }
+          const enriched = {
+            ...event,
+            properties: {
+              ...(e.properties ?? {}),
+              originalContent: pending.originalContent,
+              newContent,
+            },
+          };
+          this._broadcast(enriched as unknown as OpenCodeEvent);
+          return;
+        }
+      }
+
       this._broadcast(event);
     };
   }

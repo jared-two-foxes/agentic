@@ -1,10 +1,13 @@
 <script lang="ts">
   import { onMount, afterUpdate } from 'svelte';
   import { marked, Renderer } from 'marked';
+  import { diffLines } from 'diff';
+  import type { Change } from 'diff';
   import Header from './Header.svelte';
   import HistoryPanel from './HistoryPanel.svelte';
   import ToolCallCard from './ToolCallCard.svelte';
   import DOMPurify from 'dompurify';
+  import { isWriteTool } from './toolMeta';
 
   // Configure marked: enable GitHub-flavoured markdown, disable mangling of emails
   marked.setOptions({ gfm: true, breaks: false });
@@ -53,7 +56,7 @@
   type TextPart = { type: 'text'; partID: string; text: string };
   type ReasoningPart = { type: 'reasoning'; partID: string; text: string; done: boolean };
   type SubtaskPart = { type: 'subtask'; childSessionID: string; agentName?: string; parts: TextPart[] };
-  type ToolCallPart = { type: 'tool_call'; partID: string; toolName: string; status: 'pending' | 'running' | 'completed' | 'error'; inputText: string; result?: unknown };
+  type ToolCallPart = { type: 'tool_call'; partID: string; toolName: string; status: 'pending' | 'running' | 'completed' | 'error'; inputText: string; result?: unknown; diffHunks?: Change[] | null };
   type AssistantPart = TextPart | ReasoningPart | SubtaskPart | ToolCallPart;
   type UserMessage = { kind: 'user'; id: string; serverId?: string; text: string };
   type AssistantMessage = { kind: 'assistant'; id: string; parts: AssistantPart[]; usage?: { input: number; output: number; cost: number } };
@@ -723,11 +726,17 @@
           const props = data.properties ?? {};
           const callID = props.callID as string | undefined;
           const content = props.content as Array<{ type: string; text?: string }> | undefined;
+          const originalContent = props.originalContent as string | undefined;
+          const newContent = props.newContent as string | undefined;
           if (!callID) break;
           const tcPart = getOrCreateToolCallPart(callID);
           tcPart.status = 'completed';
           if (Array.isArray(content)) {
             tcPart.result = content.filter(c => c.type === 'text').map(c => c.text ?? '').join('\n');
+          }
+          // Compute diff when extension host injected original + new file content
+          if (originalContent !== undefined && newContent !== undefined && isWriteTool(tcPart.toolName)) {
+            tcPart.diffHunks = diffLines(originalContent, newContent);
           }
           messages = messages;
           break;
@@ -882,6 +891,7 @@
                 status={part.status}
                 params={part.inputText ? tryParseJSON(part.inputText) : undefined}
                 result={part.result}
+                diffHunks={part.diffHunks ?? null}
               />
             {/if}
           {/each}

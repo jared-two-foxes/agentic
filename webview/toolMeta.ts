@@ -31,3 +31,9 @@ export const COLLAPSE_THRESHOLD = 10;
 export function getToolMeta(toolName: string): ToolMeta {
   return TOOL_META[toolName] ?? { icon: FALLBACK.icon, label: toolName };
 }
+
+/** Returns true if the tool is a file write/edit operation that produces a meaningful diff. */
+const WRITE_TOOL_NAMES = new Set(['write', 'Write', 'edit', 'Edit']);
+export function isWriteTool(toolName: string): boolean {
+  return WRITE_TOOL_NAMES.has(toolName);
+}

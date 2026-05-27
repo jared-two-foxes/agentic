@@ -1,11 +1,14 @@
 <script lang="ts">
-  import { getToolMeta, COLLAPSE_THRESHOLD } from './toolMeta';
+  import type { Change } from 'diff';
+  import { getToolMeta, isWriteTool, COLLAPSE_THRESHOLD } from './toolMeta';
+  import DiffBlock from './DiffBlock.svelte';
 
   export let toolName: string;
   export let summary: string;
   export let status: 'pending' | 'running' | 'completed' | 'error' = 'pending';
   export let params: unknown = undefined;
   export let result: unknown = undefined;
+  export let diffHunks: Change[] | null = null;
 
   $: meta = getToolMeta(toolName);
 
@@ -51,6 +54,12 @@
         <div class="tool-section">
           <div class="tool-section-label">Params</div>
           <pre class="tool-pre">{JSON.stringify(params, null, 2)}</pre>
+        </div>
+      {/if}
+      {#if diffHunks !== null && diffHunks.length > 0 && isWriteTool(toolName)}
+        <div class="tool-section">
+          <div class="tool-section-label">Diff</div>
+          <DiffBlock hunks={diffHunks} />
         </div>
       {/if}
       {#if result !== undefined}
