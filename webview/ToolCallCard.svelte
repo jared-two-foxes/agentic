@@ -1,26 +1,36 @@
 <script lang="ts">
+  import { getToolMeta } from './toolMeta';
+
   export let toolName: string;
   export let summary: string;
   export let status: 'pending' | 'running' | 'completed' | 'error' = 'pending';
   export let params: unknown = undefined;
   export let result: unknown = undefined;
 
+  $: meta = getToolMeta(toolName);
+
   $: borderColor =
     status === 'running'   ? 'var(--vscode-charts-blue, #4fc1ff)' :
     status === 'completed' ? 'var(--vscode-testing-iconPassed, #89ca78)' :
     status === 'error'     ? 'var(--vscode-charts-red, #e06c75)' :
     /* pending */            'var(--vscode-panel-border, #444)';
+
+  $: statusIcon =
+    status === 'running'   ? '◌' :
+    status === 'completed' ? '✓' :
+    status === 'error'     ? '✕' :
+    /* pending */            '○';
 </script>
 
 <div class="tool-card" style="border-left-color: {borderColor};">
   <div class="tool-header">
-    <span class="tool-icon">🔧</span>
-    <span class="tool-label">{toolName}</span>
+    <span class="tool-icon">{meta.icon}</span>
+    <span class="tool-label">{meta.label}</span>
     {#if summary}
       <span class="tool-sep">·</span>
       <span class="tool-summary">{summary}</span>
     {/if}
-    <span class="status-badge status-{status}">{status}</span>
+    <span class="status-badge status-{status}">{statusIcon} {status}</span>
   </div>
   <div class="tool-body">
     {#if params !== undefined}
@@ -101,6 +111,16 @@
   .status-running   { color: var(--vscode-charts-blue, #4fc1ff); }
   .status-completed { color: var(--vscode-testing-iconPassed, #89ca78); }
   .status-error     { color: var(--vscode-charts-red, #e06c75); }
+
+  @keyframes spin {
+    from { transform: rotate(0deg); }
+    to   { transform: rotate(360deg); }
+  }
+
+  .status-badge.status-running {
+    animation: spin 1.2s linear infinite;
+    display: inline-block;
+  }
 
   .tool-body {
     display: none; /* expanded in FS3.4 */
