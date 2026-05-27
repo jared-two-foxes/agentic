@@ -53,7 +53,7 @@
   type SubtaskPart = { type: 'subtask'; childSessionID: string; agentName?: string; parts: TextPart[] };
   type AssistantPart = TextPart | ReasoningPart | SubtaskPart;
   type UserMessage = { kind: 'user'; id: string; serverId?: string; text: string };
-  type AssistantMessage = { kind: 'assistant'; id: string; parts: AssistantPart[] };
+  type AssistantMessage = { kind: 'assistant'; id: string; parts: AssistantPart[]; usage?: { input: number; output: number; cost: number } };
   type ErrorMessage = { kind: 'error'; id: string; text: string };
   type Message = UserMessage | AssistantMessage | ErrorMessage;
 
@@ -652,6 +652,24 @@
           isContextLoaded = true;
           break;
         }
+        case 'step-finish': {
+          const props = data.properties ?? {};
+          const tokens = props.tokens as { input?: number; output?: number } | undefined;
+          const cost = typeof props.cost === 'number' ? props.cost : 0;
+          const inputTok = typeof tokens?.input === 'number' ? tokens.input : 0;
+          const outputTok = typeof tokens?.output === 'number' ? tokens.output : 0;
+          const lastAsst = [...messages].reverse().find(m => m.kind === 'assistant') as AssistantMessage | undefined;
+          if (lastAsst) {
+            const prev = lastAsst.usage ?? { input: 0, output: 0, cost: 0 };
+            lastAsst.usage = {
+              input: prev.input + inputTok,
+              output: prev.output + outputTok,
+              cost: prev.cost + cost,
+            };
+            messages = messages;
+          }
+          break;
+        }
         default:
           // unknown message type — ignore
           break;
@@ -818,6 +836,9 @@
               </div>
             {/if}
           {/each}
+          {#if msg.usage}
+            <div class="usage-line">↓ {msg.usage.input.toLocaleString()} · ↑ {msg.usage.output.toLocaleString()}{msg.usage.cost > 0 ? ` · $${msg.usage.cost.toPrecision(4)}` : ''}</div>
+          {/if}
         </div>
       {:else if msg.kind === 'error'}
         <div class="message error-message">
@@ -1149,6 +1170,14 @@
     line-height: 1.6;
     padding: 2px 0;
     min-width: 0;
+  }
+
+  .usage-line {
+    font-size: 11px;
+    color: var(--vscode-descriptionForeground, var(--vscode-foreground));
+    margin-top: 4px;
+    opacity: 0.8;
+    user-select: text;
   }
 
   /* Markdown-rendered elements inside assistant bubbles */
