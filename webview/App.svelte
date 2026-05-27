@@ -91,6 +91,26 @@
   let renamingId: string | null = null;
   let renameValue = '';
 
+  // New task confirmation state
+  let showNewTaskConfirm = false;
+
+  function handleNewSessionClick() {
+    if (messages.length === 0) {
+      vscode.postMessage({ type: 'newSession' });
+    } else {
+      showNewTaskConfirm = true;
+    }
+  }
+
+  function confirmNewTask() {
+    showNewTaskConfirm = false;
+    vscode.postMessage({ type: 'newSession' });
+  }
+
+  function cancelNewTask() {
+    showNewTaskConfirm = false;
+  }
+
   // Context bar state
   type AgentInfo = { name: string; description?: string; model?: { modelID: string; providerID: string } };
   type ModelInfo = { id: string; providerID: string; name: string; hasVariants: boolean; variants: string[] };
@@ -118,7 +138,7 @@
   let historySaved = '';   // saves the live draft when the user starts navigating up
 
   // Reactive: disable send when input is empty, not ready, or a card is awaiting response
-  $: canSend = inputText.trim().length > 0 && status === 'ready' && !pendingQuestion && !pendingPermission && !isThinking;
+  $: canSend = inputText.trim().length > 0 && status === 'ready' && !pendingQuestion && !pendingPermission && !isThinking && !showNewTaskConfirm;
 
   // Whether the model is currently generating a response
   let isThinking = false;
@@ -686,7 +706,7 @@
     onModelClick={() => vscode.postMessage({ type: 'pickModel' })}
     onHistoryClick={toggleSessionPanel}
     onSettingsClick={() => vscode.postMessage({ type: 'openSettings' })}
-    onNewSessionClick={() => vscode.postMessage({ type: 'newSession' })}
+    onNewSessionClick={handleNewSessionClick}
   />
   <!-- Context bar -->
   {#if contextError || currentAgent !== undefined || agents.length > 0 || showVariantChip}
@@ -889,6 +909,17 @@
     </div>
   {/if}
 
+  <!-- New task confirmation banner -->
+  {#if showNewTaskConfirm}
+    <div class="new-task-confirm">
+      <span class="new-task-msg">Start a new task? The current conversation will remain in history.</span>
+      <div class="new-task-actions">
+        <button class="card-action-primary" on:click={confirmNewTask}>Confirm</button>
+        <button class="card-action-secondary" on:click={cancelNewTask}>Cancel</button>
+      </div>
+    </div>
+  {/if}
+
   <!-- Input area -->
   <div class="input-area">
     <textarea
@@ -1017,6 +1048,30 @@
     background: var(--vscode-inputValidation-infoBackground, rgba(0,122,204,0.15));
     border-top: 1px solid var(--vscode-inputValidation-infoBorder, #007acc);
     color: var(--vscode-foreground);
+    flex-shrink: 0;
+  }
+
+  /* New task confirmation banner */
+  .new-task-confirm {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 6px 12px;
+    background: var(--vscode-inputValidation-warningBackground, var(--vscode-editor-background));
+    border-top: 1px solid var(--vscode-inputValidation-warningBorder, var(--vscode-panel-border, #444));
+    flex-shrink: 0;
+    font-size: 12px;
+    color: var(--vscode-foreground);
+    flex-wrap: wrap;
+  }
+  .new-task-msg {
+    flex: 1;
+    min-width: 0;
+  }
+  .new-task-actions {
+    display: flex;
+    gap: 6px;
     flex-shrink: 0;
   }
 
