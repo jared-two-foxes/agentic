@@ -4,6 +4,7 @@
   import { diffLines } from 'diff';
   import type { Change } from 'diff';
   import Header from './Header.svelte';
+  import FilePicker from './FilePicker.svelte';
   import HistoryPanel from './HistoryPanel.svelte';
   import ToolCallCard from './ToolCallCard.svelte';
   import ContextLimitCard from './ContextLimitCard.svelte';
@@ -84,6 +85,13 @@
   let statusMessage = '';
   let messageListEl: HTMLElement;
   let chatInputEl: HTMLTextAreaElement;
+
+  // @mention file picker state
+  let mentionQuery = '';
+  let showMention = false;
+  let mentionFiles: string[] = [];
+  let filePickerEl: FilePicker;
+  let mentionStartIndex = -1;
 
   // Pending question / permission state
   let pendingQuestion: QuestionRequest | null = null;
@@ -433,6 +441,12 @@
   }
 
   function handleKeydown(e: KeyboardEvent) {
+    if (showMention && mentionFiles.length > 0) {
+      if (e.key === 'ArrowUp') { e.preventDefault(); filePickerEl?.moveUp(); return; }
+      if (e.key === 'ArrowDown') { e.preventDefault(); filePickerEl?.moveDown(); return; }
+      if (e.key === 'Enter') { e.preventDefault(); filePickerEl?.selectActive(); return; }
+      if (e.key === 'Escape') { e.preventDefault(); showMention = false; return; }
+    }
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       if (canSend) handleSend();
@@ -481,13 +495,52 @@
     }
   }
 
+  function insertMention(path: string) {
+    const before = inputText.slice(0, mentionStartIndex);
+    const after = inputText.slice(mentionStartIndex + 1 + mentionQuery.length);
+    inputText = `${before}@${path}${after}`;
+    showMention = false;
+    mentionFiles = [];
+    // restore focus + cursor after the inserted token
+    setTimeout(() => {
+      chatInputEl?.focus();
+      const pos = before.length + 1 + path.length;
+      chatInputEl?.setSelectionRange(pos, pos);
+    }, 0);
+  }
+
   function resizeTextarea(el: HTMLTextAreaElement): void {
     el.style.height = 'auto';
     el.style.height = el.scrollHeight + 'px';
   }
 
+  let fetchFilesTimer: ReturnType<typeof setTimeout>;
+  function debouncedFetchFiles(query: string) {
+    clearTimeout(fetchFilesTimer);
+    fetchFilesTimer = setTimeout(() => {
+      vscode.postMessage({ type: 'fetchFiles', query });
+    }, 150);
+  }
+
   function handleInput(e: Event): void {
-    resizeTextarea(e.currentTarget as HTMLTextAreaElement);
+    const el = e.currentTarget as HTMLTextAreaElement;
+    resizeTextarea(el);
+    // Detect @mention
+    const val = inputText;
+    const cursor = el.selectionStart ?? val.length;
+    const before = val.slice(0, cursor);
+    const atIdx = before.lastIndexOf('@');
+    if (atIdx !== -1) {
+      const fragment = before.slice(atIdx + 1);
+      if (!fragment.includes(' ') && !fragment.includes('\n')) {
+        mentionQuery = fragment;
+        mentionStartIndex = atIdx;
+        showMention = true;
+        debouncedFetchFiles(fragment);
+        return;
+      }
+    }
+    showMention = false;
   }
 
   onMount(() => {
@@ -848,6 +901,9 @@
           messages = messages;
           break;
         }
+        case 'fileList':
+          mentionFiles = Array.isArray(data.files) ? data.files : [];
+          break;
         default:
           // unknown message type — ignore
           break;
@@ -1124,22 +1180,33 @@
   {/if}
 
   <!-- Input area -->
-  <div class="input-area">
-    <textarea
-      class="chat-input"
-      placeholder="Type a message…"
-      bind:value={inputText}
-      bind:this={chatInputEl}
-      on:keydown={handleKeydown}
-      on:input={handleInput}
-      rows="1"
-      disabled={!!pendingQuestion || !!pendingPermission}
-    ></textarea>
-    <button
-      class="send-button"
-      on:click={handleSend}
-      disabled={!canSend}
-    ><i class="codicon codicon-send"></i></button>
+  <div class="input-wrapper">
+    {#if showMention}
+      <FilePicker
+        bind:this={filePickerEl}
+        files={mentionFiles}
+        query={mentionQuery}
+        onSelect={insertMention}
+        onDismiss={() => (showMention = false)}
+      />
+    {/if}
+    <div class="input-area">
+      <textarea
+        class="chat-input"
+        placeholder="Type a message…"
+        bind:value={inputText}
+        bind:this={chatInputEl}
+        on:keydown={handleKeydown}
+        on:input={handleInput}
+        rows="1"
+        disabled={!!pendingQuestion || !!pendingPermission}
+      ></textarea>
+      <button
+        class="send-button"
+        on:click={handleSend}
+        disabled={!canSend}
+      ><i class="codicon codicon-send"></i></button>
+    </div>
   </div>
   {:else if status === 'error'}
     <div class="loading-screen">
@@ -1457,6 +1524,11 @@
   }
 
   /* Input area */
+  .input-wrapper {
+    position: relative;
+    flex-shrink: 0;
+  }
+
   .input-area {
     display: flex;
     align-items: flex-end;
@@ -1464,7 +1536,6 @@
     padding: 10px 12px;
     border-top: 1px solid var(--vscode-panel-border, #444);
     background: var(--vscode-editor-background);
-    flex-shrink: 0;
   }
 
   .chat-input {

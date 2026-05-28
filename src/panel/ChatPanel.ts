@@ -855,6 +855,18 @@ export class ChatPanel implements vscode.WebviewViewProvider {
       return;
     }
 
+    if (msg.type === "fetchFiles") {
+      const query: string = (msg as unknown as { query?: string }).query ?? '';
+      const pattern = query ? `**/*${query}*` : '**/*';
+      const uris = await vscode.workspace.findFiles(pattern, '**/node_modules/**', 50);
+      const rootUri = vscode.workspace.workspaceFolders?.[0]?.uri;
+      const files = uris.map(u =>
+        rootUri ? u.fsPath.replace(rootUri.fsPath, '').replace(/\\/g, '/').replace(/^\//, '') : u.fsPath
+      );
+      webview.postMessage({ type: 'fileList', files });
+      return;
+    }
+
     if (msg.type === "openDiff") {
       if (!msg.filePath || msg.original === undefined) return;
       const filename = path.basename(msg.filePath);
@@ -903,7 +915,30 @@ export class ChatPanel implements vscode.WebviewViewProvider {
         await api.revertSession(sessionId, msg.editMessageId);
       }
 
-      await api.sendMessage(sessionId, msg.text, this._selection.agent);
+      // Inject @-mentioned file contents
+      const mentionRegex = /@([\w./\-]+)/g;
+      let match: RegExpExecArray | null;
+      let augmentedText = msg.text as string;
+      const contextBlocks: string[] = [];
+      while ((match = mentionRegex.exec(msg.text as string)) !== null) {
+        const relPath = match[1];
+        const rootUri = vscode.workspace.workspaceFolders?.[0]?.uri;
+        if (!rootUri) continue;
+        try {
+          const fileUri = vscode.Uri.joinPath(rootUri, relPath);
+          const bytes = await vscode.workspace.fs.readFile(fileUri);
+          const content = Buffer.from(bytes).toString('utf-8');
+          const ext = relPath.split('.').pop() ?? '';
+          contextBlocks.push(`\`\`\`${ext}\n// ${relPath}\n${content}\n\`\`\``);
+        } catch {
+          // file not readable — skip silently
+        }
+      }
+      if (contextBlocks.length > 0) {
+        augmentedText = contextBlocks.join('\n\n') + '\n\n' + augmentedText;
+      }
+
+      await api.sendMessage(sessionId, augmentedText, this._selection.agent);
     } catch (err: unknown) {
       // Clear dead session so the next send starts fresh
       this._unsubscribe?.();
