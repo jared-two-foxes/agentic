@@ -1,0 +1,22 @@
+@font-face {
+  font-family: 'codicon';
+  src: url('@vscode/codicons/dist/codicon.ttf') format('truetype');
+}
+
+.codicon {
+  font-family: 'codicon';
+  font-size: 16px;
+  font-style: normal;
+  font-weight: normal;
+  font-variant: normal;
+  line-height: 1;
+  display: inline-block;
+}
+
+@keyframes codicon-spin {
+  to { transform: rotate(360deg); }
+}
+.codicon-modifier-spin {
+  animation: codicon-spin 1.5s linear infinite;
+  display: inline-block;
+}

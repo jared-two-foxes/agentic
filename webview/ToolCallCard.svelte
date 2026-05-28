@@ -30,12 +30,13 @@
     status === 'pending-approval'  ? 'var(--vscode-charts-yellow, #e5c07b)' :
     /* pending */                    'var(--vscode-panel-border, #444)';
 
-  $: statusIcon =
-    status === 'running'           ? '◌' :
-    status === 'completed'         ? '✓' :
-    status === 'error'             ? '✕' :
-    status === 'pending-approval'  ? '⏸' :
-    /* pending */                    '○';
+  $: statusIconClass = (
+    status === 'running'          ? 'codicon-loading codicon-modifier-spin' :
+    status === 'completed'        ? 'codicon-check' :
+    status === 'error'            ? 'codicon-error' :
+    status === 'pending-approval' ? 'codicon-circle-pause' :
+    /* pending */                   'codicon-circle-outline'
+  );
 
   let expanded = false;
   $: if (status === 'error') expanded = true;
@@ -51,7 +52,7 @@
        on:keydown={(e) => { if (e.key === 'Enter' || e.key === ' ') expanded = !expanded; }}>
     <button class="tool-chevron" on:click|stopPropagation={() => expanded = !expanded}
             aria-label={expanded ? 'Collapse' : 'Expand'}>
-      {expanded ? '▼' : '▶'}
+      {#if expanded}<i class="codicon codicon-chevron-down"></i>{:else}<i class="codicon codicon-chevron-right"></i>{/if}
     </button>
     <span class="tool-icon">{meta.icon}</span>
     <span class="tool-label">{meta.label}</span>
@@ -59,7 +60,7 @@
       <span class="tool-sep">·</span>
       <span class="tool-summary">{summary}</span>
     {/if}
-    <span class="status-badge status-{status}">{statusIcon} {status}</span>
+    <span class="status-badge status-{status}"><i class="codicon {statusIconClass}"></i> {status}</span>
   </div>
   {#if status === 'pending-approval'}
     <div class="approval-bar">
@@ -88,9 +89,9 @@
           <div class="tool-section-header">
             <div class="tool-section-label">Diff</div>
             {#if filePath && originalContent !== undefined && newContent !== undefined && onOpenDiff}
-              <button class="open-diff-btn" on:click={() => onOpenDiff(filePath, originalContent, newContent)} title="Open in diff editor">
-                🔀 Open diff
-              </button>
+                <button class="open-diff-btn" on:click={() => onOpenDiff(filePath, originalContent, newContent)} title="Open in diff editor">
+                  <i class="codicon codicon-diff"></i> Open diff
+                </button>
             {/if}
           </div>
           <DiffBlock hunks={diffHunks} />
@@ -267,14 +268,6 @@
     width: 100%;
   }
 
-  @keyframes spin {
-    from { transform: rotate(0deg); }
-    to   { transform: rotate(360deg); }
-  }
-  .status-badge.status-running {
-    animation: spin 1.2s linear infinite;
-    display: inline-block;
-  }
 
   .tool-body {
     padding: 8px 10px;

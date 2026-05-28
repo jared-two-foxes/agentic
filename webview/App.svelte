@@ -9,6 +9,8 @@
   import ContextLimitCard from './ContextLimitCard.svelte';
   import DOMPurify from 'dompurify';
   import { isWriteTool, isCommandTool } from './toolMeta';
+  import '@vscode/codicons/dist/codicon.css';
+  import './codicons.css';
 
   // Configure marked: enable GitHub-flavoured markdown, disable mangling of emails
   marked.setOptions({ gfm: true, breaks: false });
@@ -949,7 +951,7 @@
         <div class="message user-message">
           <div class="user-bubble-wrap" class:editing={msg.id === editingMessageId}>
             <div class="bubble user-bubble">{msg.text}</div>
-            <button class="edit-btn" title="Edit message" on:click={() => startEdit(msg)}>✎</button>
+            <button class="edit-btn" title="Edit message" on:click={() => startEdit(msg)}><i class="codicon codicon-edit"></i></button>
           </div>
         </div>
       {:else if msg.kind === 'assistant'}
@@ -965,7 +967,7 @@
             {:else if part.type === 'subtask'}
               <div class="subtask-card">
                 <div class="subtask-header">
-                  <span class="subtask-icon" class:subtask-icon--spinning={isThinking}>↻</span>
+                  <span class="subtask-icon" class:subtask-icon--spinning={isThinking}><i class="codicon codicon-sync codicon-modifier-spin"></i></span>
                   <span class="subtask-prefix">Sub-agent</span>
                   {#if part.agentName}
                     <span class="subtask-sep">·</span>
@@ -1015,7 +1017,7 @@
                     Something went wrong
                   {/if}
                 </span>
-                <button class="msg-error-retry" on:click={() => handleRetry(msg)}>↩ Retry</button>
+                <button class="msg-error-retry" on:click={() => handleRetry(msg)}><i class="codicon codicon-debug-restart"></i> Retry</button>
               </div>
             {/if}
           {/if}
@@ -1032,7 +1034,7 @@
         <span class="thinking-dot"></span>
         <span class="thinking-dot"></span>
         <span class="thinking-dot"></span>
-        <button class="stop-button" on:click={handleAbort} title="Stop generation">Stop</button>
+        <button class="stop-button" on:click={handleAbort} title="Stop generation"><i class="codicon codicon-stop-circle"></i> Stop</button>
       </div>
     {/if}
   </div>
@@ -1106,7 +1108,7 @@
   {#if editingMessageId !== null}
     <div class="edit-banner">
       <span>Editing message</span>
-      <button class="edit-cancel-btn" on:click={cancelEdit}>✕ Cancel</button>
+      <button class="edit-cancel-btn" on:click={cancelEdit}><i class="codicon codicon-close"></i> Cancel</button>
     </div>
   {/if}
 
@@ -1137,11 +1139,11 @@
       class="send-button"
       on:click={handleSend}
       disabled={!canSend}
-    >Send</button>
+    ><i class="codicon codicon-send"></i></button>
   </div>
   {:else if status === 'error'}
     <div class="loading-screen">
-      <span class="loading-error-icon">⚠</span>
+      <span class="loading-error-icon"><i class="codicon codicon-warning"></i></span>
       <p class="loading-text">Failed to start server</p>
       {#if statusMessage}<p class="loading-subtext">{statusMessage}</p>{/if}
       <button class="loading-retry-btn" on:click={() => vscode.postMessage({ type: 'getStatus' })}>Retry</button>

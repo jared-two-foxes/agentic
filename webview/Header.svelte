@@ -16,13 +16,13 @@
       <span class="chip-label">{modelLabel || '—'}</span>
     </button>
     <button class="header-icon-btn" on:click={onNewSessionClick} title="New session">
-      <span>+</span>
+      <i class="codicon codicon-add"></i>
     </button>
     <button class="header-icon-btn" on:click={onHistoryClick} title="Sessions">
-      <span>🕐</span>
+      <i class="codicon codicon-history"></i>
     </button>
     <button class="header-icon-btn" on:click={onSettingsClick} title="Settings">
-      <span>⚙</span>
+      <i class="codicon codicon-gear"></i>
     </button>
   </div>
 </header>
