@@ -141,6 +141,7 @@
   let pendingQuestion: QuestionRequest | null = null;
   let questionAnswers: string[][] = [];   // one entry per QuestionInfo; each is array of selected labels
   let customAnswers: string[] = [];       // free-text per QuestionInfo when custom: true
+  let currentQuestionIndex = 0;
   let pendingPermission: PermissionRequest | null = null;
 
   // Session management state
@@ -370,16 +371,18 @@
     questionAnswers = [...questionAnswers];
   }
 
-  $: questionReady = pendingQuestion !== null && pendingQuestion.questions.every((q, i) => {
-    if (q.custom) {
-      // custom: accept either a selected option OR a non-empty free-text answer
-      return (questionAnswers[i]?.length ?? 0) > 0 || (customAnswers[i]?.trim().length ?? 0) > 0;
-    }
-    return (questionAnswers[i]?.length ?? 0) > 0;
-  });
+  $: currentQuestionReady = pendingQuestion
+    ? (questionAnswers[currentQuestionIndex]?.length > 0 ||
+       (pendingQuestion.questions[currentQuestionIndex]?.custom
+         ? customAnswers[currentQuestionIndex]?.trim().length > 0
+         : false))
+    : false;
+  $: isLastQuestion = pendingQuestion
+    ? currentQuestionIndex === pendingQuestion.questions.length - 1
+    : true;
 
   function submitQuestion() {
-    if (!pendingQuestion || !questionReady) return;
+    if (!pendingQuestion || !currentQuestionReady) return;
     // Merge custom free-text into answers: if no option selected but custom text present, use it
     const finalAnswers = pendingQuestion.questions.map((q, i) => {
       if (q.custom && (questionAnswers[i]?.length ?? 0) === 0 && customAnswers[i]?.trim()) {
@@ -391,6 +394,7 @@
     pendingQuestion = null;
     questionAnswers = [];
     customAnswers   = [];
+    currentQuestionIndex = 0;
   }
 
   function rejectQuestion() {
@@ -399,6 +403,14 @@
     pendingQuestion = null;
     questionAnswers = [];
     customAnswers   = [];
+    currentQuestionIndex = 0;
+  }
+
+  function advanceQuestion() {
+    if (!pendingQuestion) return;
+    if (currentQuestionIndex < pendingQuestion.questions.length - 1) {
+      currentQuestionIndex++;
+    }
   }
 
   // ── Permission card helpers ──────────────────────────────────────────────
@@ -658,6 +670,7 @@
             pendingQuestion = props;
             questionAnswers = props.questions.map(() => []);
             customAnswers   = props.questions.map(() => '');
+            currentQuestionIndex = 0;
             scrollToBottom();
           }
           break;
@@ -667,6 +680,7 @@
           pendingQuestion = null;
           questionAnswers = [];
           customAnswers   = [];
+          currentQuestionIndex = 0;
           break;
         }
         case 'permission.asked': {
@@ -773,6 +787,7 @@
           pendingQuestion = null;
           questionAnswers = [];
           customAnswers   = [];
+          currentQuestionIndex = 0;
           pendingPermission = null;
           // Clear child session tracking
           childSessionIds.clear();
@@ -1144,12 +1159,19 @@
 
   <!-- Question card -->
   {#if pendingQuestion}
-    <div class="prompt-card question-card">
-      <div class="card-header">
-        <span class="card-icon">?</span>
-        <span class="card-title">Question{pendingQuestion.questions.length > 1 ? 's' : ''}</span>
-      </div>
-      {#each pendingQuestion.questions as qi, i}
+    {#if pendingQuestion.questions[currentQuestionIndex]}
+      {@const qi = pendingQuestion.questions[currentQuestionIndex]}
+      <div class="prompt-card question-card">
+        <div class="card-header">
+          <span class="card-icon">?</span>
+          <span class="card-title">
+            {#if pendingQuestion.questions.length > 1}
+              Question {currentQuestionIndex + 1} of {pendingQuestion.questions.length}
+            {:else}
+              Question
+            {/if}
+          </span>
+        </div>
         <div class="card-question">
           {#if qi.header}
             <div class="card-question-header">{qi.header}</div>
@@ -1159,9 +1181,9 @@
             {#each qi.options as opt}
               <button
                 class="card-option-btn"
-                class:selected={questionAnswers[i]?.includes(opt.label)}
+                class:selected={questionAnswers[currentQuestionIndex]?.includes(opt.label)}
                 title={opt.description}
-                on:click={() => toggleQuestionOption(i, opt.label, qi.multiple ?? false)}
+                on:click={() => toggleQuestionOption(currentQuestionIndex, opt.label, qi.multiple ?? false)}
               >{opt.label}</button>
             {/each}
           </div>
@@ -1170,16 +1192,20 @@
               class="card-custom-input"
               type="text"
               placeholder="Or type a custom answer…"
-              bind:value={customAnswers[i]}
+              bind:value={customAnswers[currentQuestionIndex]}
             />
           {/if}
         </div>
-      {/each}
-      <div class="card-actions">
-        <button class="card-action-primary" disabled={!questionReady} on:click={submitQuestion}>Submit</button>
-        <button class="card-action-secondary" on:click={rejectQuestion}>Cancel</button>
+        <div class="card-actions">
+          {#if isLastQuestion}
+            <button class="card-action-primary" disabled={!currentQuestionReady} on:click={submitQuestion}>Submit</button>
+          {:else}
+            <button class="card-action-primary" disabled={!currentQuestionReady} on:click={advanceQuestion}>Next</button>
+          {/if}
+          <button class="card-action-secondary" on:click={rejectQuestion}>Cancel</button>
+        </div>
       </div>
-    </div>
+    {/if}
   {/if}
 
   <!-- Permission card -->
