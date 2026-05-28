@@ -54,7 +54,7 @@
     left: 0;
     right: 0;
     z-index: 100;
-    box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+    box-shadow: 0 4px 12px var(--vscode-widget-shadow, rgba(0,0,0,0.4));
   }
   .file-picker-item {
     padding: 4px 12px;

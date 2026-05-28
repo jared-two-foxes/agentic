@@ -237,7 +237,7 @@
   .approval-settings-link {
     background: none;
     border: none;
-    color: var(--vscode-textLink-foreground, #4daafc);
+    color: var(--vscode-textLink-foreground, #4fc1ff);
     cursor: pointer;
     font-size: 0.75em;
     padding: 0;

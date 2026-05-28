@@ -25,7 +25,7 @@
     gap: 8px;
     margin-top: 8px;
     padding: 10px 12px;
-    background: rgba(204, 167, 0, 0.1);
+    background: color-mix(in srgb, var(--vscode-editorWarning-foreground, #cca700) 12%, transparent);
     border-left: 3px solid var(--vscode-editorWarning-foreground, #cca700);
     border-radius: 0 4px 4px 0;
   }
