@@ -1064,6 +1064,20 @@
   <div class="message-list" bind:this={messageListEl} on:scroll={onScroll}
        role="log" aria-label="Chat messages" aria-live="polite"
        tabindex="-1" on:mouseenter={handleMessageListMouseEnter}>
+    {#if messages.length === 0 && !isThinking}
+      <div class="empty-state">
+        <svg class="empty-state-icon" width="48" height="48" viewBox="0 0 48 48" fill="none" aria-hidden="true">
+          <path d="M10 4 H38 A4 4 0 0 1 42 8 V30 A4 4 0 0 1 38 34 H18 L6 44 L10 34 A4 4 0 0 1 6 30 V8 A4 4 0 0 1 10 4 Z"
+                stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" fill="none"/>
+          <path d="M14 13 L22 18 L14 23"
+                stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+          <path d="M24 23 H36"
+                stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+        </svg>
+        <p class="empty-state-headline">What can I help you with?</p>
+        <p class="empty-state-sub">Ask a question, request a change, or describe a task.</p>
+      </div>
+    {/if}
     {#each messages as msg (msg.id)}
       {#if msg.kind === 'user'}
         <div class="message user-message">
@@ -1285,6 +1299,9 @@
           on:click={handleSend}
           disabled={!canSend}
         ><i class="codicon codicon-send"></i></button>
+      </div>
+      <div class="input-hint" aria-hidden="true">
+        Type <kbd>@</kbd> to attach files · paste an image · <kbd>⇧⏎</kbd> for a new line
       </div>
     </div>
   </div>
@@ -2178,5 +2195,53 @@
   .msg-error-retry:hover {
     background: var(--vscode-editorError-foreground, #f44747);
     color: var(--vscode-editor-background, #1e1e1e);
+  }
+  .empty-state {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    text-align: center;
+    padding: 32px 16px;
+    pointer-events: none;
+    user-select: none;
+  }
+  .empty-state-icon {
+    width: 48px;
+    height: 48px;
+    color: var(--vscode-descriptionForeground, var(--vscode-foreground));
+    opacity: 0.3;
+    margin-bottom: 4px;
+  }
+  .empty-state-headline {
+    font-size: 14px;
+    font-weight: 600;
+    margin: 0;
+    color: var(--vscode-foreground);
+    opacity: 0.7;
+  }
+  .empty-state-sub {
+    font-size: 12px;
+    margin: 0;
+    color: var(--vscode-descriptionForeground, var(--vscode-foreground));
+    opacity: 0.5;
+  }
+  .input-hint {
+    font-size: 10px;
+    color: var(--vscode-descriptionForeground, var(--vscode-foreground));
+    opacity: 0.45;
+    padding: 0 12px 6px;
+    user-select: none;
+    line-height: 1.4;
+  }
+  .input-hint kbd {
+    font-family: var(--vscode-editor-font-family, monospace);
+    font-size: 10px;
+    padding: 0 3px;
+    border: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.5));
+    border-radius: 2px;
+    background: var(--vscode-textCodeBlock-background, rgba(128,128,128,0.12));
   }
 </style>
