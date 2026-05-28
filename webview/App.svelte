@@ -5,6 +5,7 @@
   import type { Change } from 'diff';
   import Header from './Header.svelte';
   import FilePicker from './FilePicker.svelte';
+  import ImagePreview from './ImagePreview.svelte';
   import HistoryPanel from './HistoryPanel.svelte';
   import ToolCallCard from './ToolCallCard.svelte';
   import ContextLimitCard from './ContextLimitCard.svelte';
@@ -93,6 +94,49 @@
   let filePickerEl: FilePicker;
   let mentionStartIndex = -1;
 
+  // Pending images (clipboard paste)
+  let pendingImages: { dataUrl: string; mimeType: string }[] = [];
+  let pasteToastMsg: string = '';
+  let _pasteToastTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function showPasteToast(msg: string) {
+    pasteToastMsg = msg;
+    if (_pasteToastTimer !== null) clearTimeout(_pasteToastTimer);
+    _pasteToastTimer = setTimeout(() => { pasteToastMsg = ''; _pasteToastTimer = null; }, 3000);
+  }
+
+  function handlePaste(e: ClipboardEvent) {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
+      if (!item.type.startsWith('image/')) continue;
+      e.preventDefault();
+      if (pendingImages.length >= 5) {
+        showPasteToast('Maximum 5 images per message.');
+        return;
+      }
+      const file = item.getAsFile();
+      if (!file) continue;
+      const mimeType = item.type;
+      const reader = new FileReader();
+      reader.onload = () => {
+        if (pendingImages.length >= 5) {
+          showPasteToast('Maximum 5 images per message.');
+          return;
+        }
+        pendingImages = [...pendingImages, { dataUrl: reader.result as string, mimeType }];
+      };
+      reader.readAsDataURL(file);
+      // Only handle the first image item found per paste event
+      return;
+    }
+  }
+
+  function removeImage(index: number) {
+    pendingImages = pendingImages.filter((_, i) => i !== index);
+  }
+
   // Pending question / permission state
   let pendingQuestion: QuestionRequest | null = null;
   let questionAnswers: string[][] = [];   // one entry per QuestionInfo; each is array of selected labels
@@ -153,7 +197,7 @@
   let historySaved = '';   // saves the live draft when the user starts navigating up
 
   // Reactive: disable send when input is empty, not ready, or a card is awaiting response
-  $: canSend = inputText.trim().length > 0 && status === 'ready' && !pendingQuestion && !pendingPermission && !isThinking && !showNewTaskConfirm;
+  $: canSend = (inputText.trim().length > 0 || pendingImages.length > 0) && status === 'ready' && !pendingQuestion && !pendingPermission && !isThinking && !showNewTaskConfirm;
 
   // Whether the model is currently generating a response
   let isThinking = false;
@@ -388,7 +432,9 @@
 
   function handleSend() {
     const text = inputText.trim();
-    if (!text) return;
+    if (!text && pendingImages.length === 0) return;
+
+    const imagesToSend = [...pendingImages];
 
     if (editingMessageId !== null) {
       // Trim messages: drop the edited bubble and everything after it
@@ -404,16 +450,17 @@
     } else {
       messages = [...messages, { kind: 'user', text, id: nextId() }];
       isThinking = true;
-      vscode.postMessage({ type: 'send', text });
+      vscode.postMessage({ type: 'send', text, images: imagesToSend });
     }
 
     // Push to history; drop duplicate if same as last entry
-    if (historyStack.length === 0 || historyStack[historyStack.length - 1] !== text) {
+    if (text && (historyStack.length === 0 || historyStack[historyStack.length - 1] !== text)) {
       historyStack = [...historyStack, text];
     }
     historyCursor = historyStack.length;
     historySaved = '';
     inputText = '';
+    pendingImages = [];
     requestAnimationFrame(() => {
       if (chatInputEl) resizeTextarea(chatInputEl);
     });
@@ -1191,21 +1238,28 @@
       />
     {/if}
     <div class="input-area">
-      <textarea
-        class="chat-input"
-        placeholder="Type a message…"
-        bind:value={inputText}
-        bind:this={chatInputEl}
-        on:keydown={handleKeydown}
-        on:input={handleInput}
-        rows="1"
-        disabled={!!pendingQuestion || !!pendingPermission}
-      ></textarea>
-      <button
-        class="send-button"
-        on:click={handleSend}
-        disabled={!canSend}
-      ><i class="codicon codicon-send"></i></button>
+      <ImagePreview images={pendingImages} onRemove={removeImage} />
+      {#if pasteToastMsg}
+        <div class="paste-toast">{pasteToastMsg}</div>
+      {/if}
+      <div class="input-row">
+        <textarea
+          class="chat-input"
+          placeholder="Type a message…"
+          bind:value={inputText}
+          bind:this={chatInputEl}
+          on:keydown={handleKeydown}
+          on:input={handleInput}
+          on:paste={handlePaste}
+          rows="1"
+          disabled={!!pendingQuestion || !!pendingPermission}
+        ></textarea>
+        <button
+          class="send-button"
+          on:click={handleSend}
+          disabled={!canSend}
+        ><i class="codicon codicon-send"></i></button>
+      </div>
     </div>
   </div>
   {:else if status === 'error'}
@@ -1531,11 +1585,24 @@
 
   .input-area {
     display: flex;
+    flex-direction: column;
+    border-top: 1px solid var(--vscode-panel-border, #444);
+    background: var(--vscode-editor-background);
+  }
+
+  .input-row {
+    display: flex;
     align-items: flex-end;
     gap: 8px;
     padding: 10px 12px;
-    border-top: 1px solid var(--vscode-panel-border, #444);
-    background: var(--vscode-editor-background);
+  }
+
+  .paste-toast {
+    font-size: 11px;
+    color: var(--vscode-inputValidation-warningForeground, #fff);
+    background: var(--vscode-inputValidation-warningBackground, #6c4a00);
+    border-top: 1px solid var(--vscode-inputValidation-warningBorder, #b89500);
+    padding: 4px 10px;
   }
 
   .chat-input {

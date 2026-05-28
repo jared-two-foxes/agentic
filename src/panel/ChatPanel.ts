@@ -599,7 +599,7 @@ export class ChatPanel implements vscode.WebviewViewProvider {
 
   private async _handleMessage(
     webview: vscode.Webview,
-    msg: { type: string; text?: string; requestID?: string; answers?: unknown; reply?: string; message?: string; sessionId?: string; title?: string; editMessageId?: string; filePath?: string; original?: string; modified?: string }
+    msg: { type: string; text?: string; requestID?: string; answers?: unknown; reply?: string; message?: string; sessionId?: string; title?: string; editMessageId?: string; filePath?: string; original?: string; modified?: string; images?: { dataUrl: string; mimeType: string }[] }
   ): Promise<void> {
     const port: number = vscode.workspace.getConfiguration("opencode").get("port") ?? 4096;
 
@@ -885,7 +885,7 @@ export class ChatPanel implements vscode.WebviewViewProvider {
     }
 
     if (msg.type !== "send" && msg.type !== "editMessage") return;
-    if (!msg.text) return;
+    if (!msg.text && !(Array.isArray(msg.images) && (msg.images as unknown[]).length > 0)) return;
 
     try {
       const password = await this.secrets.get("opencode.password") ?? "";
@@ -938,7 +938,7 @@ export class ChatPanel implements vscode.WebviewViewProvider {
         augmentedText = contextBlocks.join('\n\n') + '\n\n' + augmentedText;
       }
 
-      await api.sendMessage(sessionId, augmentedText, this._selection.agent);
+      await api.sendMessage(sessionId, augmentedText, this._selection.agent, msg.images as { dataUrl: string; mimeType: string }[] | undefined);
     } catch (err: unknown) {
       // Clear dead session so the next send starts fresh
       this._unsubscribe?.();

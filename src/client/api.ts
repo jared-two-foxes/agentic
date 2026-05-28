@@ -282,12 +282,45 @@ export class OpenCodeClient {
     }
   }
 
-  async sendMessage(sessionId: string, prompt: string, agent?: string): Promise<void> {
-    const body: Record<string, unknown> = {
-      parts: [{ type: "text", text: prompt }],
-    };
+  async sendMessage(
+    sessionId: string,
+    prompt: string,
+    agent?: string,
+    images?: { dataUrl: string; mimeType: string }[]
+  ): Promise<void> {
+    const parts: unknown[] = [];
+    if (prompt) {
+      parts.push({ type: "text", text: prompt });
+    }
+    if (images && images.length > 0) {
+      // Strip the data URL prefix (e.g. "data:image/png;base64,") to get raw base64
+      for (const img of images) {
+        const base64 = img.dataUrl.includes(",") ? img.dataUrl.split(",")[1] : img.dataUrl;
+        parts.push({ type: "image", image: base64, mimeType: img.mimeType });
+      }
+    }
+    if (parts.length === 0) {
+      // Nothing to send
+      console.warn("[opencode] sendMessage called with no text and no images — skipping");
+      return;
+    }
+    const body: Record<string, unknown> = { parts };
     if (agent) body.agent = agent;
-    await this.request("POST", `/session/${sessionId}/message`, body);
+    try {
+      await this.request("POST", `/session/${sessionId}/message`, body);
+    } catch (err) {
+      // If the API rejects multipart (image) messages, retry with text-only and log a warning
+      if (images && images.length > 0) {
+        console.warn("[opencode] Image parts rejected by API — retrying with text only:", err);
+        const fallbackParts: unknown[] = prompt ? [{ type: "text", text: prompt }] : [];
+        if (fallbackParts.length === 0) return;
+        const fallbackBody: Record<string, unknown> = { parts: fallbackParts };
+        if (agent) fallbackBody.agent = agent;
+        await this.request("POST", `/session/${sessionId}/message`, fallbackBody);
+      } else {
+        throw err;
+      }
+    }
   }
 
   subscribeEvents(
