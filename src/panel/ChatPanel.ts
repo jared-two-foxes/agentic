@@ -615,8 +615,35 @@ export class ChatPanel implements vscode.WebviewViewProvider {
 
     if (msg.type === "getStatus") {
       this._broadcast({ type: "status", ...this._lastStatus });
-      if (this._lastStatus.value === "ready" && !this._sessionPromise) {
-        this._fetchAndPostContext(webview);
+      if (this._lastStatus.value === "ready") {
+        if (!this._sessionPromise) {
+          // No active session — do full context + restore fetch.
+          this._fetchAndPostContext(webview);
+        } else {
+          // Session is in-flight or already restored; webview may have missed
+          // the earlier IPC messages (fired before onMount attached listener).
+          // Re-send cached context immediately (no server call needed).
+          const stale = this._context.workspaceState.get<CachedContext>(this._contextKey());
+          if (stale) {
+            webview.postMessage({ type: "context", ...stale });
+          }
+          // Chain onto _sessionPromise so history is re-sent once the ID is known.
+          // Pending sentinel → .then() fires when _tryRestoreSession resolves.
+          // Already resolved → .then() fires in next microtask.
+          // Rejected (no session) → .catch() swallows silently.
+          this._sessionPromise
+            .then(async (sessionId) => {
+              if (!this._api) return;
+              const history = await this._api.getSessionMessages(sessionId, 50);
+              const msgs = this._mapToWebviewMessages(history);
+              webview.postMessage({
+                type: "sessionRestored",
+                messages: msgs,
+                current: { ...this._selection },
+              });
+            })
+            .catch(() => { /* no session to restore — stay empty */ });
+        }
       }
       return;
     }
