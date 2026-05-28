@@ -70,7 +70,7 @@
   }
   .file-picker-item.active,
   .file-picker-item:hover {
-    background: var(--vscode-list-hoverBackground, #2a2d2e);
-    color: var(--vscode-list-activeSelectionForeground, #fff);
+    background: var(--vscode-list-hoverBackground, rgba(128,128,128,0.1));
+    color: var(--vscode-list-activeSelectionForeground, currentColor);
   }
 </style>

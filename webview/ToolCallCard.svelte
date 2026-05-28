@@ -122,7 +122,7 @@
     border: 1px solid var(--vscode-panel-border, #444);
     border-left-width: 3px;
     border-radius: 6px;
-    background: var(--vscode-input-background, #1e1e1e);
+    background: var(--vscode-input-background, transparent);
     overflow: hidden;
     margin: 4px 0;
   }
@@ -249,7 +249,7 @@
   .command-preview {
     font-family: var(--vscode-editor-font-family, monospace);
     font-size: 0.85em;
-    background: var(--vscode-textCodeBlock-background, rgba(0,0,0,0.2));
+    background: var(--vscode-textCodeBlock-background, rgba(128,128,128,0.15));
     border-radius: 4px;
     padding: 6px 8px;
     margin: 4px 0 6px;
@@ -310,7 +310,7 @@
     font-family: var(--vscode-editor-font-family, monospace);
     font-size: 11px;
     color: var(--vscode-foreground, #ccc);
-    background: var(--vscode-textCodeBlock-background, #2d2d2d);
+    background: var(--vscode-textCodeBlock-background, rgba(128,128,128,0.15));
     padding: 6px 8px;
     border-radius: 4px;
   }

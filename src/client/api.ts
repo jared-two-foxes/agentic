@@ -268,20 +268,6 @@ export class OpenCodeClient {
     await this.request("POST", `/session/${sessionId}/abort`);
   }
 
-  async findFiles(query: string): Promise<string[]> {
-    try {
-      const res = await fetch(`${this.baseUrl}/find/file?pattern=${encodeURIComponent(query)}`);
-      if (!res.ok) return [];
-      const data = await res.json();
-      // data may be string[] or { files: string[] } — handle both
-      if (Array.isArray(data)) return data;
-      if (Array.isArray((data as { files?: unknown })?.files)) return (data as { files: string[] }).files;
-      return [];
-    } catch {
-      return [];
-    }
-  }
-
   async sendMessage(
     sessionId: string,
     prompt: string,

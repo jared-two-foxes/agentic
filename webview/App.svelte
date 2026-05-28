@@ -1783,9 +1783,6 @@
     padding: 8px 12px 4px;
   }
 
-  .card-question + .card-question {
-    border-top: 1px solid var(--vscode-panel-border, #333);
-  }
 
   .card-question-header {
     font-size: 11px;
