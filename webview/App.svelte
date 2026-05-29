@@ -60,7 +60,7 @@
   // Types
   type TextPart = { type: 'text'; partID: string; text: string };
   type ReasoningPart = { type: 'reasoning'; partID: string; text: string; done: boolean };
-  type SubtaskPart = { type: 'subtask'; childSessionID: string; agentName?: string; parts: TextPart[] };
+  type SubtaskPart = { type: 'subtask'; childSessionID: string; agentName?: string; parts: (TextPart | ToolCallPart)[]; status: 'running' | 'done' | 'error' };
   type ToolCallPart = { type: 'tool_call'; partID: string; toolName: string; status: 'pending' | 'running' | 'completed' | 'error' | 'pending-approval'; inputText: string; result?: unknown; diffHunks?: Change[] | null; filePath?: string; originalContent?: string; newContent?: string; pendingApprovalID?: string; commandString?: string };
   type AssistantPart = TextPart | ReasoningPart | SubtaskPart | ToolCallPart;
   type UserMessage = { kind: 'user'; id: string; serverId?: string; text: string };
@@ -206,6 +206,9 @@
   // Known child session IDs (for routing sub-agent stream deltas)
   const childSessionIds = new Set<string>();
 
+  // Track whether each subtask is expanded, keyed by childSessionID (default open = true)
+  let subtaskOpenState: Record<string, boolean> = {};
+
   // Edit state — set when the user clicks the pencil on a user bubble
   let editingMessageId: string | null = null;   // local msg.id of the bubble being edited
   let editingServerId: string | null = null;     // server-side messageID for the revert call
@@ -283,7 +286,7 @@
       p => p.type === 'subtask' && (p as SubtaskPart).childSessionID === childSessionID
     ) as SubtaskPart | undefined;
     if (!subtask) return; // placeholder not yet created — intentionally dropped
-    const existingPart = subtask.parts.find(p => p.partID === partID);
+    const existingPart = subtask.parts.find(p => p.type === 'text' && p.partID === partID) as TextPart | undefined;
     if (existingPart) {
       existingPart.text += delta;
     } else {
@@ -307,6 +310,29 @@
     assistantMsg.parts = [...assistantMsg.parts, part];
     messages = [...messages];
     return part;
+  }
+
+  /** Get or create a ToolCallPart inside the SubtaskPart for the given child session */
+  function getOrCreateSubtaskToolCallPart(childSessionID: string, callID: string, toolName?: string): ToolCallPart | null {
+    // Search all assistant messages (most recent first)
+    const assistantMsgs = [...messages].filter(m => m.kind === 'assistant').reverse() as AssistantMessage[];
+    for (const assistantMsg of assistantMsgs) {
+      const subtask = assistantMsg.parts.find(
+        p => p.type === 'subtask' && (p as SubtaskPart).childSessionID === childSessionID
+      ) as SubtaskPart | undefined;
+      if (!subtask) continue;
+      const existing = subtask.parts.find(
+        p => p.type === 'tool_call' && (p as ToolCallPart).partID === callID
+      ) as ToolCallPart | undefined;
+      if (existing) {
+        if (toolName) existing.toolName = toolName;
+        return existing;
+      }
+      const part: ToolCallPart = { type: 'tool_call', partID: callID, toolName: toolName ?? '', status: 'pending', inputText: '' };
+      subtask.parts = [...subtask.parts, part];
+      return part;
+    }
+    return null; // no SubtaskPart found — drop silently
   }
 
   function tryParseJSON(s: string): unknown {
@@ -762,10 +788,27 @@
           const assistantMsg = getOrCreateAssistantMessage();
           assistantMsg.parts = [
             ...assistantMsg.parts,
-            { type: 'subtask', childSessionID: childId, agentName, parts: [] } as SubtaskPart,
+            { type: 'subtask', childSessionID: childId, agentName, parts: [], status: 'running' } as SubtaskPart,
           ];
           messages = [...messages];
           scrollToBottom();
+          break;
+        }
+        case 'subtask.completed': {
+          const sessionID = data.properties?.sessionID as string | undefined;
+          if (!sessionID) break;
+          for (const msg of messages) {
+            if (msg.kind !== 'assistant') continue;
+            const subtask = msg.parts.find(
+              p => p.type === 'subtask' && (p as SubtaskPart).childSessionID === sessionID
+            ) as SubtaskPart | undefined;
+            if (subtask) {
+              subtask.status = 'done';
+              subtaskOpenState = { ...subtaskOpenState, [sessionID]: false };
+              messages = [...messages];
+              break;
+            }
+          }
           break;
         }
         case 'newSession': {
@@ -891,8 +934,13 @@
           const props = data.properties ?? {};
           const callID = props.callID as string | undefined;
           const toolName = props.name as string | undefined;
+          const sessionID = props.sessionID as string | undefined;
           if (!callID) break;
-          getOrCreateToolCallPart(callID, toolName);
+          if (sessionID && childSessionIds.has(sessionID)) {
+            getOrCreateSubtaskToolCallPart(sessionID, callID, toolName);
+          } else {
+            getOrCreateToolCallPart(callID, toolName);
+          }
           scrollToBottom();
           break;
         }
@@ -900,31 +948,36 @@
           const props = data.properties ?? {};
           const callID = props.callID as string | undefined;
           const delta = props.delta as string | undefined;
+          const sessionID = props.sessionID as string | undefined;
           if (!callID || !delta) break;
-          const tcPart = getOrCreateToolCallPart(callID);
-          tcPart.inputText += delta;
-          messages = messages;
+          const tcPart = (sessionID && childSessionIds.has(sessionID))
+            ? getOrCreateSubtaskToolCallPart(sessionID, callID)
+            : getOrCreateToolCallPart(callID);
+          if (tcPart) { tcPart.inputText += delta; messages = messages; }
           break;
         }
         case 'session.next.tool.input.ended': {
           const props = data.properties ?? {};
           const callID = props.callID as string | undefined;
           const text = props.text as string | undefined;
+          const sessionID = props.sessionID as string | undefined;
           if (!callID || text === undefined) break;
-          const tcPart = getOrCreateToolCallPart(callID);
-          tcPart.inputText = text;
-          messages = messages;
+          const tcPart = (sessionID && childSessionIds.has(sessionID))
+            ? getOrCreateSubtaskToolCallPart(sessionID, callID)
+            : getOrCreateToolCallPart(callID);
+          if (tcPart) { tcPart.inputText = text; messages = messages; }
           break;
         }
         case 'session.next.tool.called': {
           const props = data.properties ?? {};
           const callID = props.callID as string | undefined;
           const toolName = props.tool as string | undefined;
+          const sessionID = props.sessionID as string | undefined;
           if (!callID) break;
-          const tcPart = getOrCreateToolCallPart(callID, toolName);
-          tcPart.status = 'running';
-          messages = messages;
-          scrollToBottom();
+          const tcPart = (sessionID && childSessionIds.has(sessionID))
+            ? getOrCreateSubtaskToolCallPart(sessionID, callID, toolName)
+            : getOrCreateToolCallPart(callID, toolName);
+          if (tcPart) { tcPart.status = 'running'; messages = messages; scrollToBottom(); }
           break;
         }
         case 'session.next.tool.success': {
@@ -934,8 +987,12 @@
           const originalContent = props.originalContent as string | undefined;
           const newContent = props.newContent as string | undefined;
           const filePath = props.filePath as string | undefined;
+          const sessionID = props.sessionID as string | undefined;
           if (!callID) break;
-          const tcPart = getOrCreateToolCallPart(callID);
+          const tcPart = (sessionID && childSessionIds.has(sessionID))
+            ? getOrCreateSubtaskToolCallPart(sessionID, callID)
+            : getOrCreateToolCallPart(callID);
+          if (!tcPart) break;
           tcPart.status = 'completed';
           if (Array.isArray(content)) {
             tcPart.result = content.filter(c => c.type === 'text').map(c => c.text ?? '').join('\n');
@@ -950,14 +1007,19 @@
             tcPart.filePath = filePath;
           }
           messages = messages;
+          scrollToBottom();
           break;
         }
         case 'session.next.tool.failed': {
           const props = data.properties ?? {};
           const callID = props.callID as string | undefined;
           const error = props.error as { message?: string } | string | undefined;
+          const sessionID = props.sessionID as string | undefined;
           if (!callID) break;
-          const tcPart = getOrCreateToolCallPart(callID);
+          const tcPart = (sessionID && childSessionIds.has(sessionID))
+            ? getOrCreateSubtaskToolCallPart(sessionID, callID)
+            : getOrCreateToolCallPart(callID);
+          if (!tcPart) break;
           tcPart.status = 'error';
           tcPart.result = typeof error === 'string' ? error : (error?.message ?? 'Tool failed');
           messages = messages;
@@ -1098,19 +1160,55 @@
               </details>
             {:else if part.type === 'subtask'}
               <div class="subtask-card">
-                <div class="subtask-header">
-                  <span class="subtask-icon" class:subtask-icon--spinning={isThinking}><i class="codicon codicon-sync codicon-modifier-spin"></i></span>
-                  <span class="subtask-prefix">Sub-agent</span>
-                  {#if part.agentName}
-                    <span class="subtask-sep">·</span>
-                    <span class="subtask-label">{part.agentName}</span>
+                <div class="subtask-header"
+                  role="button"
+                  tabindex="0"
+                  on:click={() => subtaskOpenState = { ...subtaskOpenState, [part.childSessionID]: !(subtaskOpenState[part.childSessionID] ?? true) }}
+                  on:keydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); subtaskOpenState = { ...subtaskOpenState, [part.childSessionID]: !(subtaskOpenState[part.childSessionID] ?? true) }; } }}
+                >
+                  {#if part.status === 'running'}
+                    <i class="codicon codicon-sync codicon-modifier-spin subtask-status-icon subtask-status-icon--running"></i>
+                  {:else if part.status === 'done'}
+                    <i class="codicon codicon-check subtask-status-icon subtask-status-icon--done"></i>
+                  {:else}
+                    <i class="codicon codicon-error subtask-status-icon subtask-status-icon--error"></i>
                   {/if}
+                  <span class="subtask-agent-name">{part.agentName ?? 'Sub-agent'}</span>
+                  {#if part.parts.filter(p => p.type === 'tool_call').length > 0}
+                    <span class="subtask-tool-count">{part.parts.filter(p => p.type === 'tool_call').length} {part.parts.filter(p => p.type === 'tool_call').length === 1 ? 'tool' : 'tools'}</span>
+                  {/if}
+                  <i class="codicon subtask-chevron" class:codicon-chevron-down={subtaskOpenState[part.childSessionID] ?? true} class:codicon-chevron-right={!(subtaskOpenState[part.childSessionID] ?? true)}></i>
                 </div>
-                <div class="subtask-body">
-                  {#each part.parts as sp (sp.partID)}
-                    <div class="subtask-text">{sp.text}</div>
-                  {/each}
-                </div>
+                {#if subtaskOpenState[part.childSessionID] ?? true}
+                  <div class="subtask-body">
+                    {#each part.parts as sp}
+                      {#if sp.type === 'text'}
+                        {#if sp.text.trim()}
+                          <div class="subtask-text">{@html renderMarkdown(sp.text)}</div>
+                        {/if}
+                      {:else if sp.type === 'tool_call'}
+                        <div class="subtask-tool-wrap">
+                          <ToolCallCard
+                            toolName={sp.toolName}
+                            summary={getToolSummary(sp.toolName, sp.inputText)}
+                            status={sp.status}
+                            params={sp.inputText ? tryParseJSON(sp.inputText) : undefined}
+                            result={sp.result}
+                            diffHunks={sp.diffHunks ?? null}
+                            filePath={sp.filePath}
+                            originalContent={sp.originalContent}
+                            newContent={sp.newContent}
+                            pendingApprovalID={sp.pendingApprovalID}
+                            onApprove={sp.pendingApprovalID ? () => { vscode.postMessage({ type: 'permissionReply', requestID: sp.pendingApprovalID, reply: 'once' }); sp.status = 'running'; sp.pendingApprovalID = undefined; messages = [...messages]; } : undefined}
+                            onReject={sp.pendingApprovalID ? () => { vscode.postMessage({ type: 'permissionReply', requestID: sp.pendingApprovalID, reply: 'reject' }); sp.status = 'error'; sp.result = 'Rejected by user'; sp.pendingApprovalID = undefined; messages = [...messages]; } : undefined}
+                            onOpenSettings={() => vscode.postMessage({ type: 'openSettings' })}
+                            onOpenDiff={(fp, orig, mod) => vscode.postMessage({ type: 'openDiff', filePath: fp, original: orig, modified: mod })}
+                          />
+                        </div>
+                      {/if}
+                    {/each}
+                  </div>
+                {/if}
               </div>
             {:else if part.type === 'tool_call'}
               <ToolCallCard
@@ -2052,12 +2150,11 @@
 
   /* ── Subtask card ─────────────────────────────────────────────────────── */
   .subtask-card {
-    margin: 6px 0;
-    margin-left: 12px;
+    margin: 4px 0;
     border: 1px solid var(--vscode-panel-border, #444);
     border-left: 3px solid var(--vscode-charts-blue, #4fc1ff);
-    border-radius: 4px;
-    background: var(--vscode-textCodeBlock-background, rgba(128,128,128,0.08));
+    border-radius: 6px;
+    background: var(--vscode-input-background, transparent);
     overflow: hidden;
   }
 
@@ -2065,56 +2162,63 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    padding: 5px 10px;
-    border-bottom: 1px solid var(--vscode-panel-border, #444);
-    background: color-mix(in srgb, var(--vscode-charts-blue, #4fc1ff) 10%, transparent);
+    padding: 6px 10px;
+    font-size: 12px;
+    cursor: pointer;
+    user-select: none;
+  }
+
+  .subtask-header:hover {
+    background: var(--vscode-list-hoverBackground, rgba(255,255,255,0.05));
+  }
+
+  .subtask-status-icon { flex-shrink: 0; font-size: 13px; }
+  .subtask-status-icon--running { color: var(--vscode-charts-blue, #4fc1ff); }
+  .subtask-status-icon--done    { color: var(--vscode-testing-iconPassed, #89ca78); }
+  .subtask-status-icon--error   { color: var(--vscode-charts-red, #e06c75); }
+
+  .subtask-agent-name {
     font-size: 11px;
     font-weight: 600;
-    letter-spacing: 0.04em;
-  }
-
-  .subtask-icon {
-    font-size: 14px;
-    line-height: 1;
-    display: inline-block;
-    flex-shrink: 0;
-    color: var(--vscode-charts-blue, #4fc1ff);
-  }
-
-  .subtask-icon--spinning {
-    animation: subtask-spin 1.4s linear infinite;
-  }
-
-  @keyframes subtask-spin {
-    to { transform: rotate(360deg); }
-  }
-
-  .subtask-prefix {
-    color: var(--vscode-charts-blue, #4fc1ff);
     text-transform: uppercase;
+    letter-spacing: 0.04em;
+    opacity: 0.85;
   }
 
-  .subtask-sep {
-    opacity: 0.35;
+  .subtask-tool-count {
+    font-size: 10px;
+    padding: 1px 6px;
+    border-radius: 10px;
+    border: 1px solid currentColor;
+    opacity: 0.7;
+    color: var(--vscode-descriptionForeground, #888);
+    white-space: nowrap;
   }
 
-  .subtask-label {
-    opacity: 0.65;
-    font-weight: 400;
-    text-transform: none;
-    letter-spacing: 0;
+  .subtask-chevron {
+    margin-left: auto;
+    opacity: 0.5;
+    font-size: 10px;
+    flex-shrink: 0;
   }
 
   .subtask-body {
-    padding: 6px 10px;
-    font-size: 12px;
-    line-height: 1.5;
-    word-break: break-word;
+    padding: 6px 10px 8px;
+    border-top: 1px solid var(--vscode-panel-border, #444);
   }
 
   .subtask-text {
-    white-space: pre-wrap;
+    font-size: 12px;
+    color: var(--vscode-foreground, #ccc);
     opacity: 0.85;
+    margin-bottom: 4px;
+  }
+
+  /* Markdown within subtask text */
+  :global(.subtask-text p) { margin: 0 0 4px; }
+
+  .subtask-tool-wrap {
+    margin: 4px 0;
   }
 
   /* ── Shiki code blocks & copy button ─────────────────────────────────── */

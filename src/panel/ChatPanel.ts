@@ -416,6 +416,7 @@ export class ChatPanel implements vscode.WebviewViewProvider {
             (childEvent) => {
               // Prune on child idle before deciding whether to forward
               if (childEvent.type === "session.idle") {
+                this._broadcast({ type: 'subtask.completed', properties: { sessionID: childId } });
                 const unsub = this._childUnsubscribes.get(childId);
                 if (unsub) {
                   unsub();
