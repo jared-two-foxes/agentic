@@ -1,5 +1,6 @@
 import * as crypto from 'crypto';
 import type * as vscode from 'vscode';
+import type { AgentDefinition } from '../agents/types';
 
 // ── Message parts ─────────────────────────────────────────────────────────────
 
@@ -62,6 +63,8 @@ export class Session {
   history: HistoryMessage[] = [];
   readonly createdAt: number;
   updatedAt: number;
+  /** Runtime-only — resolved from registry; NOT persisted to workspaceState */
+  agentDefinition?: AgentDefinition;
 
   constructor(opts: {
     id?: string;

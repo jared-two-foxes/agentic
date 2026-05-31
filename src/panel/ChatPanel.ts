@@ -170,6 +170,12 @@ export class ChatPanel implements vscode.WebviewViewProvider {
       this._broadcast(event);
       return;
     }
+    if (event.type === 'engine.agents.reloaded') {
+      if (this._currentView) {
+        this._fetchAndPostContext(this._currentView.webview, false);
+      }
+      return;
+    }
     if (event.type === 'engine.provider.changed') {
       if (this._currentView) {
         this._fetchAndPostContext(this._currentView.webview, false);
@@ -215,6 +221,7 @@ export class ChatPanel implements vscode.WebviewViewProvider {
       this._agents = agents.map(a => ({
         name: a.name,
         description: (a as { description?: string }).description,
+        model: (a as { model?: { modelID: string; providerID: string } }).model,
       }));
       this._models = models.map(m => ({
         id: m.id,
@@ -223,14 +230,12 @@ export class ChatPanel implements vscode.WebviewViewProvider {
       }));
 
       const current: CurrentSelection = {};
-      if (config.defaultAgent) current.agent = config.defaultAgent;
-      if (config.activeModel) {
-        const parts = config.activeModel.split('/');
+      if (config.default_agent) current.agent = config.default_agent;
+      if (config.model) {
+        const parts = config.model.split('/');
         if (parts.length >= 2) {
           current.providerID = parts[0];
           current.modelId = parts.slice(1).join('/');
-        } else {
-          current.modelId = config.activeModel;
         }
       }
 

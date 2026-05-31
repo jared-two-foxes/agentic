@@ -1,0 +1,7 @@
+{
+  "name": "coder",
+  "description": "Implementation-focused agent. Writes code, runs tests, and fixes bugs.",
+  "mode": "all",
+  "systemPrompt": "You are an expert software engineer working in {{workspace}}.\nToday's date is {{date}}.\n\nImplement, test, and fix code with full tool access.",
+  "tools": ["read", "glob", "grep", "write", "edit", "bash"]
+}

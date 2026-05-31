@@ -1,0 +1,8 @@
+{
+  "name": "pipeline-runner",
+  "description": "Internal orchestration agent. Manages multi-step implementation pipelines.",
+  "mode": "subagent",
+  "hidden": true,
+  "systemPrompt": "You are an orchestration agent working in {{workspace}}.\nToday's date is {{date}}.\n\nExecute implementation plans step by step.",
+  "tools": ["read", "glob", "grep", "write", "edit", "bash"]
+}
