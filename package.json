@@ -45,6 +45,11 @@
         "title": "Minimize Chat",
         "icon": "$(screen-normal)",
         "category": "opencode"
+      },
+      {
+        "command": "opencode.configureProvider",
+        "title": "opencode: Configure AI Provider",
+        "category": "opencode"
       }
     ],
     "menus": {
@@ -96,15 +101,26 @@
     "configuration": {
       "title": "opencode",
       "properties": {
-        "opencode.port": {
-          "type": "number",
-          "default": 4096,
-          "description": "Port for the opencode server"
-        },
-        "opencode.binaryPath": {
+        "opencode.provider": {
           "type": "string",
-          "default": "",
-          "description": "Path to the opencode binary. Leave empty to use PATH."
+          "enum": ["vscode-lm", "anthropic", "openai-compatible"],
+          "default": "vscode-lm",
+          "description": "LLM provider to use. 'vscode-lm' uses GitHub Copilot (no API key needed). 'anthropic' calls Anthropic directly. 'openai-compatible' works with OpenAI, Ollama, LM Studio, Azure, and any OpenAI-compatible API."
+        },
+        "opencode.anthropicModel": {
+          "type": "string",
+          "default": "claude-opus-4-5",
+          "description": "Anthropic model to use (e.g. claude-opus-4-5, claude-sonnet-4-5)"
+        },
+        "opencode.openaiBaseUrl": {
+          "type": "string",
+          "default": "https://api.openai.com/v1",
+          "description": "Base URL for OpenAI-compatible API (e.g. http://localhost:11434/v1 for Ollama)"
+        },
+        "opencode.openaiModel": {
+          "type": "string",
+          "default": "gpt-4o",
+          "description": "Model to use for OpenAI-compatible provider"
         },
         "opencode.autoApprove.fileWrites": {
           "type": "boolean",
