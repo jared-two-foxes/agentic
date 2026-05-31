@@ -49,6 +49,8 @@ export class ChatPanel implements vscode.WebviewViewProvider {
   private _editorPanel: vscode.WebviewPanel | undefined;
   private _editorDisposables: vscode.Disposable[] = [];
   private _engineSubscribed = false;
+  private _childSessionIds = new Set<string>();
+  private _pendingChildCreated: EngineEvent[] = [];
 
   private static readonly SESSION_KEY = "opencode.sessionId";
   private static readonly AGENT_KEY   = "opencode.agentSelection";
@@ -142,48 +144,89 @@ export class ChatPanel implements vscode.WebviewViewProvider {
   }
 
   private _handleEngineEvent(event: EngineEvent): void {
-    if (event.type === 'permission.asked') {
-      const props = event.properties ?? {};
-      const permName = props.permission as string | undefined;
-      const permId   = props.id as string | undefined;
-      if (!permId || !permName) {
+    try {
+      if (event.type === 'session.created') {
+        const props = event.properties ?? {};
+        const info = props.info as { id?: string; parentID?: string } | undefined;
+        const parentID = info?.parentID;
+        const childId = props.sessionID as string | undefined;
+
+        if (childId && parentID) {
+          if (!this._sessionPromise) {
+            this._pendingChildCreated.push(event);
+            return;
+          }
+          const activeId = this._context.workspaceState.get<string>(this._sessionKey());
+          if (activeId && parentID === activeId && this._childSessionIds.size < 10) {
+            this._childSessionIds.add(childId);
+          }
+          this._broadcast(event);
+          return;
+        }
         this._broadcast(event);
         return;
       }
-      const autoApproveFileWrites = vscode.workspace.getConfiguration('opencode').get<boolean>('autoApprove.fileWrites', false);
-      const autoApproveCommands   = vscode.workspace.getConfiguration('opencode').get<boolean>('autoApprove.commands', false);
-      const autoApproveFileReads  = vscode.workspace.getConfiguration('opencode').get<boolean>('autoApprove.fileReads', true);
 
-      if (ChatPanel._isWriteToolName(permName) && autoApproveFileWrites) {
-        this._engine.permissionReply(permId, 'once');
+      const props = event.properties ?? {};
+      const eventSessionId = props.sessionID as string | undefined;
+
+      if (eventSessionId && this._childSessionIds.has(eventSessionId)) {
+        if (event.type === 'session.idle') {
+          this._broadcast({
+            type: 'subtask.completed',
+            id: event.id,
+            properties: { sessionID: eventSessionId },
+          });
+          this._childSessionIds.delete(eventSessionId);
+          return;
+        }
+        if (event.type === 'session.status') return;
+        this._broadcast(event);
         return;
       }
-      if (ChatPanel._isCommandToolName(permName) && autoApproveCommands) {
-        this._engine.permissionReply(permId, 'once');
+
+      if (event.type === 'permission.asked') {
+        const permName = props.permission as string | undefined;
+        const permId   = props.id as string | undefined;
+        if (!permId || !permName) {
+          this._broadcast(event);
+          return;
+        }
+        const autoApproveFileWrites = vscode.workspace.getConfiguration('opencode').get<boolean>('autoApprove.fileWrites', false);
+        const autoApproveCommands   = vscode.workspace.getConfiguration('opencode').get<boolean>('autoApprove.commands', false);
+        const autoApproveFileReads  = vscode.workspace.getConfiguration('opencode').get<boolean>('autoApprove.fileReads', true);
+
+        if (ChatPanel._isWriteToolName(permName) && autoApproveFileWrites) {
+          this._engine.permissionReply(permId, 'once');
+          return;
+        }
+        if (ChatPanel._isCommandToolName(permName) && autoApproveCommands) {
+          this._engine.permissionReply(permId, 'once');
+          return;
+        }
+        if (ChatPanel._isReadToolName(permName) && autoApproveFileReads) {
+          this._engine.permissionReply(permId, 'once');
+          return;
+        }
+        this._broadcast(event);
         return;
       }
-      if (ChatPanel._isReadToolName(permName) && autoApproveFileReads) {
-        this._engine.permissionReply(permId, 'once');
+      if (event.type === 'engine.agents.reloaded') {
+        if (this._currentView) {
+          this._fetchAndPostContext(this._currentView.webview, false);
+        }
         return;
       }
-      // Not auto-approved → forward to webview
+      if (event.type === 'engine.provider.changed') {
+        if (this._currentView) {
+          this._fetchAndPostContext(this._currentView.webview, false);
+        }
+        return;
+      }
       this._broadcast(event);
-      return;
+    } catch {
+      /* prevent unhandled rejections */
     }
-    if (event.type === 'engine.agents.reloaded') {
-      if (this._currentView) {
-        this._fetchAndPostContext(this._currentView.webview, false);
-      }
-      return;
-    }
-    if (event.type === 'engine.provider.changed') {
-      if (this._currentView) {
-        this._fetchAndPostContext(this._currentView.webview, false);
-      }
-      return;
-    }
-    // Forward all other events to webview
-    this._broadcast(event);
   }
 
   private async _getOrCreateSession(): Promise<string> {
@@ -193,6 +236,11 @@ export class ChatPanel implements vscode.WebviewViewProvider {
         .then(id => {
           this._context.workspaceState.update(this._sessionKey(), id);
           this._pushSessionList(id).catch(() => {});
+          // Drain buffered child-created events
+          const pending = this._pendingChildCreated.splice(0);
+          for (const e of pending) {
+            this._handleEngineEvent(e);
+          }
           return id;
         })
         .catch(err => {
@@ -304,6 +352,8 @@ export class ChatPanel implements vscode.WebviewViewProvider {
   resetSession(): void {
     this._sessionPromise = undefined;
     this._selection = {};
+    this._childSessionIds.clear();
+    this._pendingChildCreated = [];
     this._context.workspaceState.update(this._sessionKey(), undefined);
     this._broadcast({ type: "newSession" });
     this._broadcast({ type: "status", ...this._lastStatus });

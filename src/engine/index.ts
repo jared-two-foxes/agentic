@@ -14,6 +14,7 @@ import { AgentRunner } from './runner';
 import type { ModelInfo } from '../providers/base';
 import { AgentRegistry } from '../agents/registry';
 import { expandSystemPrompt, DEFAULT_TOOLS } from '../agents/types';
+import { SpawnAgentCallbacks } from '../tools/spawn-agent';
 
 const DEFAULT_SYSTEM_PROMPT = `You are a helpful AI coding assistant. You have access to tools to read and write files, search the codebase, and run shell commands. Always ask for clarification if the user's request is ambiguous. Prefer minimal, targeted changes.`;
 
@@ -50,6 +51,13 @@ export class AgentEngine extends EventEmitter {
   private _registry: ProviderRegistry | undefined;
   private _agentRegistry = new AgentRegistry();
   private _runners  = new Map<string, AgentRunner>();
+  private _childRunners = new Map<string, {
+    runner: AgentRunner;
+    parentId: string;
+    resolve: (text: string) => void;
+    reject: (err: Error) => void;
+    promise: Promise<string>;
+  }>();
   private _pendingPermissions = new Map<string, {
     resolve: (r: 'once' | 'always') => void;
     reject: (e: Error) => void;
@@ -203,11 +211,89 @@ export class AgentEngine extends EventEmitter {
 
     // Build filtered tool registry based on agent's allowed tools
     const allowedTools = def?.tools ?? [...DEFAULT_TOOLS];
-    const filteredRegistry = new ToolRegistry();
-    for (const toolName of allowedTools) {
-      const tool = this._tools.get(toolName);
-      if (tool) filteredRegistry.register(tool);
+    // Check global runner cap
+    const totalActive = this._runners.size + this._childRunners.size;
+    if (totalActive >= 5) {
+      throw new Error(
+        'Maximum concurrent agents (5) reached. ' +
+        'Please wait for the current tasks to complete before starting new ones.'
+      );
     }
+
+    const filteredRegistry = this._buildFilteredRegistry(allowedTools);
+
+    const callbacks: SpawnAgentCallbacks = {
+      spawnChild: async (agentName: string, prompt: string, context?: string): Promise<string> => {
+        const childId = await this._createChildSession(sessionId, agentName);
+        const fullPrompt = context ? `Context:\n${context}\n\nTask:\n${prompt}` : prompt;
+        const childSession = this._sessions.get(childId)!;
+        const childDef = childSession.agentDefinition;
+        const childSystemPrompt = childDef
+          ? expandSystemPrompt(childDef.systemPrompt, { workspaceRoot })
+          : DEFAULT_SYSTEM_PROMPT;
+        const childAllowedTools = childDef?.tools ?? [...DEFAULT_TOOLS];
+        const childRegistry = this._buildFilteredRegistry(childAllowedTools);
+
+        const childRunner = new AgentRunner(
+          childSession,
+          this._registry!.getActive(),
+          childRegistry,
+          childSystemPrompt,
+          (event: EngineEvent) => this.emit('event', event),
+          this._pendingPermissions,
+        );
+
+        let storedResolve!: (text: string) => void;
+        let storedReject!: (err: Error) => void;
+        const childPromise = new Promise<string>((resolve, reject) => {
+          storedResolve = resolve;
+          storedReject = reject;
+        });
+
+        this._childRunners.set(childId, {
+          runner: childRunner,
+          parentId: sessionId,
+          resolve: storedResolve,
+          reject: storedReject,
+          promise: childPromise,
+        });
+
+        // Start child runner in background
+        childRunner.run(fullPrompt)
+          .then(() => {
+            const last = [...childSession.history].reverse().find(m => m.role === 'assistant');
+            const text = last?.parts
+              .filter((p): p is { type: 'text'; id: string; text: string } => p.type === 'text')
+              .map(p => p.text)
+              .join('') ?? '';
+            const entry = this._childRunners.get(childId);
+            if (entry) {
+              entry.resolve(text);
+            }
+            this._emitEvent({
+              type: 'session.idle',
+              id: crypto.randomUUID(),
+              properties: { sessionID: childId },
+            });
+          })
+          .catch((err: unknown) => {
+            const entry = this._childRunners.get(childId);
+            if (entry) {
+              entry.reject(err instanceof Error ? err : new Error(String(err)));
+            }
+          });
+
+        return childId;
+      },
+
+      awaitChildIdle: (childId: string): Promise<string> => {
+        const entry = this._childRunners.get(childId);
+        if (!entry) return Promise.resolve('');
+        return entry.promise.finally(() => {
+          this._childRunners.delete(childId);
+        });
+      },
+    };
 
     const runner = new AgentRunner(
       session,
@@ -216,6 +302,7 @@ export class AgentEngine extends EventEmitter {
       systemPrompt,
       (event: EngineEvent) => this.emit('event', event),
       this._pendingPermissions,
+      callbacks,
     );
     this._runners.set(sessionId, runner);
 
@@ -226,8 +313,87 @@ export class AgentEngine extends EventEmitter {
     }
   }
 
+  private _buildFilteredRegistry(allowedTools: string[]): ToolRegistry {
+    const registry = new ToolRegistry();
+    for (const name of allowedTools) {
+      const tool = this._tools.get(name);
+      if (tool) registry.register(tool);
+    }
+    return registry;
+  }
+
+  private async _createChildSession(
+    parentId: string,
+    agentName: string,
+  ): Promise<string> {
+    const childCount = [...this._childRunners.values()].filter(c => c.parentId === parentId).length;
+    if (childCount >= 10) {
+      throw new Error('Max concurrent child sessions (10) reached');
+    }
+
+    const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
+    const def = this._agentRegistry.get(agentName) ?? this._agentRegistry.get('default');
+    const childSession = this._sessions.create({
+      directory: workspaceRoot,
+      agentName,
+      parentID: parentId,
+    });
+    childSession.agentDefinition = def;
+
+    this._emitEvent({
+      type: 'session.created',
+      id: crypto.randomUUID(),
+      properties: {
+        sessionID: childSession.id,
+        info: childSession.toInfo(),
+      },
+    });
+
+    return childSession.id;
+  }
+
   abort(sessionId: string): void {
+    this._abortTree(sessionId);
+  }
+
+  private _abortTree(sessionId: string): void {
     this._runners.get(sessionId)?.abort();
+    this._runners.delete(sessionId);
+    const childrenToAbort: Array<{
+      childId: string;
+      entry: {
+        runner: AgentRunner;
+        parentId: string;
+        resolve: (text: string) => void;
+        reject: (err: Error) => void;
+        promise: Promise<string>;
+      };
+    }> = [];
+    for (const [childId, entry] of this._childRunners) {
+      if (entry.parentId === sessionId) {
+        childrenToAbort.push({ childId, entry });
+      }
+    }
+    for (const { childId, entry } of childrenToAbort) {
+      entry.runner.abort();
+      entry.reject(new Error('Aborted by parent'));
+      this._childRunners.delete(childId);
+      this._abortTree(childId);
+    }
+  }
+
+  getRunnerStats(): { active: number; sessions: string[] } {
+    const sessions = [
+      ...this._runners.keys(),
+      ...this._childRunners.keys(),
+    ];
+    return { active: sessions.length, sessions };
+  }
+
+  listChildren(parentId: string): SessionInfo[] {
+    return this._sessions.list()
+      .filter(s => s.parentID === parentId)
+      .map(s => s.toInfo());
   }
 
   // ── Context ───────────────────────────────────────────────────────────────────

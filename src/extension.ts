@@ -78,5 +78,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 }
 
 export function deactivate(): void {
+  if (engine) {
+    for (const sessionId of engine.getRunnerStats().sessions) {
+      engine.abort(sessionId);
+    }
+  }
   engine = undefined;
 }

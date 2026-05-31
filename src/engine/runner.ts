@@ -3,6 +3,8 @@ import type { IProvider, ProviderMessage, AssistantMessage, UserMessage } from '
 import type { ToolRegistry, EmitEventFn, PermissionGateFn } from '../tools/index';
 import { PermissionRejectedError } from '../tools/index';
 import type { Session, HistoryMessage, MessagePart } from './session';
+import { isSpawnAgentCall, SpawnAgentToolDefinition, SPAWN_AGENT_TOOL_NAME } from '../tools/spawn-agent';
+import type { SpawnAgentCallbacks } from '../tools/spawn-agent';
 
 const MAX_ITERATIONS = 20;
 
@@ -17,6 +19,7 @@ export class AgentRunner {
     private systemPrompt: string,
     private emitEvent: EmitEventFn,
     private pendingPermissions: Map<string, { resolve: (r: 'once' | 'always') => void; reject: (e: Error) => void }>,
+    private callbacks?: SpawnAgentCallbacks,
   ) {}
 
   abort(): void {
@@ -57,6 +60,19 @@ export class AgentRunner {
       this.session.title = userText.slice(0, 50).trim();
     }
 
+    const WALL_CLOCK_MS = 5 * 60 * 1000;
+    const timeoutHandle = setTimeout(() => {
+      this.abort();
+      this.emitEvent({
+        type: 'session.status',
+        id: crypto.randomUUID(),
+        properties: {
+          sessionID: this.session.id,
+          status: { type: 'error', error: 'Agent timed out after 5 minutes' },
+        },
+      });
+    }, WALL_CLOCK_MS);
+
     let iterations = 0;
 
     try {
@@ -72,6 +88,7 @@ export class AgentRunner {
 
         const messages = this._formatMessages();
         const toolDefs = this.tools.definitions();
+        if (this.callbacks) toolDefs.push(SpawnAgentToolDefinition);
 
         // Accumulated data for this turn
         let accText = '';
@@ -160,6 +177,40 @@ export class AgentRunner {
         // Execute tools sequentially
         const toolResultParts: MessagePart[] = [];
         for (const tc of toolCallsThisTurn) {
+          // Intercept spawn_agent before ToolRegistry
+          if (this.callbacks && isSpawnAgentCall(tc.name)) {
+            const input = tc.input as { agent?: string; prompt?: string; context?: string };
+            const agentName = input.agent ?? 'default';
+            const prompt = input.prompt ?? '';
+            const context = input.context ?? '';
+
+            let resultText: string;
+            try {
+              const childId = await this.callbacks.spawnChild(agentName, prompt, context);
+              resultText = await this.callbacks.awaitChildIdle(childId);
+              this.emitEvent({
+                type: 'session.next.tool.success',
+                id: crypto.randomUUID(),
+                properties: { sessionID: this.session.id, callID: tc.id },
+              });
+            } catch (err) {
+              resultText = `Sub-agent failed: ${err instanceof Error ? err.message : String(err)}`;
+              this.emitEvent({
+                type: 'session.next.tool.error',
+                id: crypto.randomUUID(),
+                properties: { sessionID: this.session.id, callID: tc.id, error: resultText },
+              });
+            }
+
+            toolResultParts.push({
+              type: 'tool_result',
+              id: crypto.randomUUID(),
+              toolUseId: tc.id,
+              content: resultText,
+            });
+            continue;
+          }
+
           const awaitPermission: PermissionGateFn = (requestId, toolName, patterns) => {
             return new Promise((resolve, reject) => {
               this.pendingPermissions.set(requestId, { resolve, reject });
@@ -240,9 +291,12 @@ export class AgentRunner {
         this.session.history.push(toolResultMsg);
       }
     } catch (err) {
-      const errMsg = err instanceof Error ? err.message : String(err);
-      this._emitStatus('error', errMsg);
+      if (!signal.aborted) {
+        const errMsg = err instanceof Error ? err.message : String(err);
+        this._emitStatus('error', errMsg);
+      }
     } finally {
+      clearTimeout(timeoutHandle);
       this._isRunning = false;
       this._controller = undefined;
     }
